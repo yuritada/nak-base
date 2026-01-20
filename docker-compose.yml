@@ -1,0 +1,116 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: nak_base_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nakbase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nakbase_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-nakbase}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nakbase}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nak_network
+
+  # Redis Message Queue
+  redis:
+    image: redis:7-alpine
+    container_name: nak_base_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nak_network
+
+  # FastAPI Backend (Operating API)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nak_base_backend
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nakbase}:${POSTGRES_PASSWORD:-nakbase_secret}@db:5432/${POSTGRES_DB:-nakbase}
+      REDIS_URL: redis://redis:6379/0
+      GOOGLE_APPLICATION_CREDENTIALS: /app/secrets/service-account.json
+      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID}
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+    volumes:
+      - ./backend:/app
+      - ./secrets:/app/secrets:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nak_network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # AI Inference Worker
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: nak_base_worker
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nakbase}:${POSTGRES_PASSWORD:-nakbase_secret}@db:5432/${POSTGRES_DB:-nakbase}
+      REDIS_URL: redis://redis:6379/0
+      GOOGLE_APPLICATION_CREDENTIALS: /app/secrets/service-account.json
+      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    volumes:
+      - ./worker:/app
+      - ./secrets:/app/secrets:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nak_network
+    command: python -m app.worker
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nak_base_frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - nak_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  nak_network:
+    driver: bridge
