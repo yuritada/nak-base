@@ -76,7 +76,9 @@ CREATE TABLE seminars (
 );
 
 -- Create index for vector similarity search
-CREATE INDEX ON seminars USING ivfflat (content_vector vector_cosine_ops) WITH (lists = 100);
+-- Note: Using HNSW index instead of IVFFlat as it works better with small datasets
+-- IVFFlat requires sufficient data for good recall; HNSW has no such limitation
+CREATE INDEX idx_seminars_vector ON seminars USING hnsw (content_vector vector_cosine_ops);
 
 -- Inference tasks table (for tracking async jobs)
 CREATE TABLE inference_tasks (
