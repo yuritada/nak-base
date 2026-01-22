@@ -1,7 +1,7 @@
 services:
-  # PostgreSQL with pgvector
+  # PostgreSQL (MVP: 標準版、pgvectorなし)
   db:
-    image: pgvector/pgvector:pg16
+    image: postgres:16-alpine
     container_name: nak_base_db
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nakbase}
@@ -19,8 +19,9 @@ services:
       retries: 5
     networks:
       - nak_network
+    restart: always
 
-  # Redis Message Queue
+  # Redis Message Queue (シンプルなFIFOキュー)
   redis:
     image: redis:7-alpine
     container_name: nak_base_redis
@@ -35,6 +36,36 @@ services:
       retries: 5
     networks:
       - nak_network
+    restart: always
+
+  # Ollama LLM Container
+  ollama:
+    image: ollama/ollama:latest
+    container_name: nak_base_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - nak_network
+    restart: always
+    # 初回起動後に手動で ollama pull gemma2:2b を実行
+
+  # Parser Service (PDF→テキスト抽出)
+  parser:
+    build:
+      context: ./parser
+      dockerfile: Dockerfile
+    container_name: nak_base_parser
+    volumes:
+      - ./parser:/app
+      - paper_storage:/storage:ro
+    ports:
+      - "8001:8001"
+    networks:
+      - nak_network
+    restart: always
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 
   # FastAPI Backend (Operating API)
   backend:
@@ -45,12 +76,11 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-nakbase}:${POSTGRES_PASSWORD:-nakbase_secret}@db:5432/${POSTGRES_DB:-nakbase}
       REDIS_URL: redis://redis:6379/0
-      GOOGLE_APPLICATION_CREDENTIALS: /app/secrets/service-account.json
-      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID}
       SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+      STORAGE_PATH: /storage
     volumes:
       - ./backend:/app
-      - ./secrets:/app/secrets:ro
+      - paper_storage:/storage
     ports:
       - "8000:8000"
     depends_on:
@@ -60,9 +90,10 @@ services:
         condition: service_healthy
     networks:
       - nak_network
+    restart: always
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-  # AI Inference Worker
+  # AI Inference Worker (シングルプロセス、順次実行)
   worker:
     build:
       context: ./worker
@@ -71,19 +102,24 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-nakbase}:${POSTGRES_PASSWORD:-nakbase_secret}@db:5432/${POSTGRES_DB:-nakbase}
       REDIS_URL: redis://redis:6379/0
-      GOOGLE_APPLICATION_CREDENTIALS: /app/secrets/service-account.json
-      GOOGLE_DRIVE_FOLDER_ID: ${GOOGLE_DRIVE_FOLDER_ID}
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      OLLAMA_URL: http://ollama:11434
+      PARSER_URL: http://parser:8001
+      STORAGE_PATH: /storage
     volumes:
       - ./worker:/app
-      - ./secrets:/app/secrets:ro
+      - paper_storage:/storage:ro
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      ollama:
+        condition: service_started
+      parser:
+        condition: service_started
     networks:
       - nak_network
+    restart: always
     command: python -m app.worker
 
   # Next.js Frontend
@@ -104,10 +140,13 @@ services:
       - backend
     networks:
       - nak_network
+    restart: always
 
 volumes:
   postgres_data:
   redis_data:
+  ollama_data:
+  paper_storage:
 
 networks:
   nak_network:

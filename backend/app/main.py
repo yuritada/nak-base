@@ -1,11 +1,14 @@
+"""
+nak-base MVP版 FastAPI メインアプリケーション
+"""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import users, papers, feedbacks, dashboard
+from .routers import auth, papers
 from .services.queue_service import get_queue_length
 
 app = FastAPI(
-    title="nak-base API",
-    description="論文フィードバックシステム - 研究室の『集合知』で、最高の一本を。",
+    title="nak-base API (MVP)",
+    description="論文フィードバックシステム MVP版 - PDFを投げたらAIが感想を返す",
     version="1.0.0"
 )
 
@@ -19,17 +22,15 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(users.router)
+app.include_router(auth.router)
 app.include_router(papers.router)
-app.include_router(feedbacks.router)
-app.include_router(dashboard.router)
 
 
 @app.get("/")
 def root():
     """Health check endpoint."""
     return {
-        "service": "nak-base API",
+        "service": "nak-base API (MVP)",
         "status": "running",
         "version": "1.0.0"
     }
