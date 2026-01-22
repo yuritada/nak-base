@@ -30,10 +30,6 @@ class PaperResponse(BaseModel):
         from_attributes = True
 
 
-class PaperWithTasks(PaperResponse):
-    tasks: List["TaskResponse"] = []
-
-
 # Task schemas
 class TaskResponse(BaseModel):
     id: int
@@ -47,6 +43,10 @@ class TaskResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PaperWithTasks(PaperResponse):
+    tasks: List["TaskResponse"] = []
 
 
 # Upload response
