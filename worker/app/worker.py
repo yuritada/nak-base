@@ -52,7 +52,26 @@ def call_parser(file_path: str) -> str:
 
 
 def call_ollama(text: str) -> dict:
-    """Ollamaを呼び出してテキスト分析"""
+    """Ollamaを呼び出してテキスト分析（Mock対応版）"""
+
+    # Mockモードが有効な場合は即座にデモデータを返す
+    if settings.mock_mode:
+        print("Mock mode: Returning demo data...")
+        time.sleep(2)  # 処理してる感を出すための待ち時間
+        return {
+            "summary": "本論文は、AIを活用した論文指導システムの構築について述べています。特に、マルチエージェントを用いたフィードバック層の導入により、教員の負担軽減と指導の質の向上を提案しています。",
+            "typos": [
+                "1ページ目：『システムアーキテクチャ』→『システムアーキテクチャ』(スペルミス)",
+                "3ページ目：『即時フィードバック』が『即時フイードバック』になっています"
+            ],
+            "suggestions": [
+                "先行研究の比較表を追加すると、提案手法の優位性がより明確になります。",
+                "図3の文字サイズが小さいため、拡大を推奨します。",
+                "結論部分で、今後の展望についてもう少し詳しく触れてください。"
+            ]
+        }
+
+    # 以下、元のOllama呼び出しロジック
     prompt = OLLAMA_PROMPT.format(text=text[:10000])  # 最初の10000文字のみ
 
     response = requests.post(

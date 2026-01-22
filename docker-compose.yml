@@ -105,6 +105,7 @@ services:
       OLLAMA_URL: http://ollama:11434
       PARSER_URL: http://parser:8001
       STORAGE_PATH: /storage
+      MOCK_MODE: "true" # 開発用にモックモードをデフォルトで有効化
     volumes:
       - ./worker:/app
       - paper_storage:/storage:ro
