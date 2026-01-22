@@ -115,6 +115,9 @@ def call_ollama(text: str) -> dict:
 
 def process_task(task_id: int):
     """タスクを処理"""
+    if settings.debug_mode:
+        print(f"【デバッグ】タスク処理開始: Task ID={task_id}")
+
     db = get_db_session()
 
     try:
@@ -131,16 +134,24 @@ def process_task(task_id: int):
         db.commit()
 
         # 1. Parserを呼び出してテキスト抽出
+        if settings.debug_mode:
+            print(f"【デバッグ】Parserコンテナへテキスト抽出を依頼中... (Path: {task.file_path})")
         print("Calling Parser service...")
         parsed_text = call_parser(task.file_path)
         task.parsed_text = parsed_text
         db.commit()
+        if settings.debug_mode:
+            print(f"【デバッグ】Parserより受領。抽出文字数: {len(parsed_text)}文字")
         print(f"Parsed text length: {len(parsed_text)}")
 
         # 2. Ollamaを呼び出して分析
+        if settings.debug_mode:
+            print(f"【デバッグ】AI推論(Ollama)を開始します...")
         print("Calling Ollama for analysis...")
         result = call_ollama(parsed_text)
         task.result_json = result
+        if settings.debug_mode:
+            print(f"【デバッグ】AI推論完了。結果をDBに書き込みます。")
         print("Ollama analysis complete")
 
         # ステータス更新: completed

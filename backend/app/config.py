@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24  # 24時間
     storage_path: str = "/storage"
+    debug_mode: bool = False
 
     class Config:
         env_file = ".env"

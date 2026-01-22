@@ -48,6 +48,9 @@ async def upload_paper(
     3. tasksレコード作成（status=pending）
     4. Redisにtask_idをPUSH
     """
+    if settings.debug_mode:
+        print(f"【デバッグ】論文アップロード受信: タイトル='{title}', ファイル='{file.filename}'")
+
     # PDFのみ受付
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
@@ -64,6 +67,9 @@ async def upload_paper(
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
+
+    if settings.debug_mode:
+        print(f"【デバッグ】ローカルストレージに保存完了: {file_path}")
 
     # Paper作成
     paper = Paper(
@@ -84,8 +90,14 @@ async def upload_paper(
     db.commit()
     db.refresh(task)
 
+    if settings.debug_mode:
+        print(f"【デバッグ】DB登録完了: Paper ID={paper.id}, Task ID={task.id}")
+
     # Redisにタスク追加
     push_task(task.id)
+
+    if settings.debug_mode:
+        print(f"【デバッグ】RedisキューにTask ID={task.id}を投入しました")
 
     return UploadResponse(
         message="Upload successful",

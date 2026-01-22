@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     parser_url: str = "http://parser:8001"
     storage_path: str = "/storage"
     mock_mode: bool = True  # デフォルトをTrue(デモモード)にする
+    debug_mode: bool = False
 
     class Config:
         env_file = ".env"

@@ -44,6 +44,9 @@ def parse_pdf(request: ParseRequest):
     """
     file_path = request.file_path
 
+    if os.getenv("DEBUG_MODE") == "true":
+        print(f"【デバッグ】パースリクエスト受信: {file_path}")
+
     # ファイル存在確認
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
@@ -62,6 +65,9 @@ def parse_pdf(request: ParseRequest):
                 text_parts.append(page_text)
 
         full_text = "\n\n".join(text_parts)
+
+        if os.getenv("DEBUG_MODE") == "true":
+            print(f"【デバッグ】パース完了: {len(full_text)}文字抽出、全{len(reader.pages)}ページ")
 
         return ParseResponse(
             text=full_text,

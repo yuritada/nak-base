@@ -57,6 +57,8 @@ services:
       context: ./parser
       dockerfile: Dockerfile
     container_name: nak_base_parser
+    environment:
+      DEBUG_MODE: "true"
     volumes:
       - ./parser:/app
       - paper_storage:/storage:ro
@@ -78,6 +80,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
       STORAGE_PATH: /storage
+      DEBUG_MODE: "true"
     volumes:
       - ./backend:/app
       - paper_storage:/storage
@@ -106,6 +109,7 @@ services:
       PARSER_URL: http://parser:8001
       STORAGE_PATH: /storage
       MOCK_MODE: "true" # 開発用にモックモードをデフォルトで有効化
+      DEBUG_MODE: "true"
     volumes:
       - ./worker:/app
       - paper_storage:/storage:ro
