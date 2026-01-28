@@ -1,5 +1,6 @@
 """
-MVP版 Worker設定
+Phase 1 Worker設定
+RAG基盤対応
 """
 from pydantic_settings import BaseSettings
 from functools import lru_cache
@@ -13,6 +14,16 @@ class Settings(BaseSettings):
     storage_path: str = "/storage"
     mock_mode: bool = True  # デフォルトをTrue(デモモード)にする
     debug_mode: bool = False
+
+    # Embedding settings
+    embedding_model: str = "nomic-embed-text"
+    embedding_dim: int = 768
+
+    # LLM settings
+    llm_model: str = "gemma2:2b"
+
+    # Retry settings
+    max_retries: int = 3
 
     class Config:
         env_file = ".env"
