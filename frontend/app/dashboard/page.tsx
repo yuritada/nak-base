@@ -2,18 +2,29 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Users, FileText, Clock, CheckCircle, Loader2 } from 'lucide-react';
-import { getProfessorDashboard, type DashboardData } from '@/lib/api';
+import { FileText, Loader2, Plus } from 'lucide-react';
+import { getPapers, type Paper } from '@/lib/api';
 
 export default function DashboardPage() {
-  const [data, setData] = useState<DashboardData | null>(null);
+  const [papers, setPapers] = useState<Paper[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const fetchPapers = async () => {
+    try {
+      const data = await getPapers();
+      setPapers(data);
+    } catch (e) {
+      console.error('Failed to fetch papers:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    getProfessorDashboard()
-      .then(setData)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    fetchPapers();
+    // 3秒ごとにポーリング
+    const interval = setInterval(fetchPapers, 3000);
+    return () => clearInterval(interval);
   }, []);
 
   if (loading) {
@@ -24,149 +35,113 @@ export default function DashboardPage() {
     );
   }
 
-  if (!data) {
-    return <div className="text-center py-12 text-gray-500">データを取得できませんでした</div>;
-  }
-
-  const getScoreColor = (score: number | null | undefined) => {
-    if (score === null || score === undefined) return 'bg-gray-200';
-    if (score >= 80) return 'bg-green-500';
-    if (score >= 60) return 'bg-yellow-500';
-    return 'bg-red-500';
-  };
-
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">教授ダッシュボード</h1>
-
-      {/* Stats Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-        <div className="bg-white p-6 rounded-lg shadow-sm border">
-          <div className="flex items-center">
-            <Users className="w-8 h-8 text-blue-500 mr-3" />
-            <div>
-              <p className="text-2xl font-bold">{data.total_students}</p>
-              <p className="text-sm text-gray-500">学生数</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-sm border">
-          <div className="flex items-center">
-            <FileText className="w-8 h-8 text-green-500 mr-3" />
-            <div>
-              <p className="text-2xl font-bold">{data.total_papers}</p>
-              <p className="text-sm text-gray-500">総論文数</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-sm border">
-          <div className="flex items-center">
-            <Clock className="w-8 h-8 text-yellow-500 mr-3" />
-            <div>
-              <p className="text-2xl font-bold">{data.papers_in_progress}</p>
-              <p className="text-sm text-gray-500">分析中</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-sm border">
-          <div className="flex items-center">
-            <CheckCircle className="w-8 h-8 text-green-500 mr-3" />
-            <div>
-              <p className="text-2xl font-bold">{data.papers_completed}</p>
-              <p className="text-sm text-gray-500">完了</p>
-            </div>
-          </div>
-        </div>
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold">論文一覧</h1>
+        <Link
+          href="/upload"
+          className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+        >
+          <Plus className="w-5 h-5 mr-2" />
+          アップロード
+        </Link>
       </div>
 
-      {/* Student Papers Table */}
       <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
-        <div className="px-6 py-4 border-b">
-          <h2 className="text-lg font-semibold">学生論文一覧</h2>
-        </div>
-
-        {data.student_papers.length === 0 ? (
-          <div className="px-6 py-8 text-center text-gray-500">
-            まだ論文がアップロードされていません
+        {papers.length === 0 ? (
+          <div className="px-6 py-12 text-center">
+            <FileText className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+            <p className="text-gray-500 mb-4">まだ論文がありません</p>
+            <Link
+              href="/upload"
+              className="text-blue-600 hover:underline"
+            >
+              最初の論文をアップロードする
+            </Link>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    学生名
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    論文タイトル
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Ver
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    ステータス
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    スコア
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200">
-                {data.student_papers.map((sp, idx) => (
-                  <tr key={idx} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {sp.user_name}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-900">
-                      <Link
-                        href={`/papers/${sp.paper_id}`}
-                        className="text-blue-600 hover:underline"
-                      >
-                        {sp.paper_title}
-                      </Link>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      v{sp.latest_version}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span
-                        className={`px-2 py-1 text-xs rounded-full ${
-                          sp.status === 'Completed'
-                            ? 'bg-green-100 text-green-800'
-                            : sp.status === 'Processing'
-                            ? 'bg-yellow-100 text-yellow-800'
-                            : sp.status === 'Error'
-                            ? 'bg-red-100 text-red-800'
-                            : 'bg-gray-100 text-gray-800'
-                        }`}
-                      >
-                        {sp.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {sp.latest_score ? (
-                        <div className="flex items-center">
-                          <div
-                            className={`w-3 h-3 rounded-full mr-2 ${getScoreColor(sp.latest_score.overall)}`}
-                          />
-                          <span className="text-sm font-medium">
-                            {sp.latest_score.overall}
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-gray-400">-</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <table className="w-full">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  タイトル
+                </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  アップロード日時
+                </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  ステータス
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {papers.map((paper) => (
+                <PaperRow key={paper.id} paper={paper} />
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
     </div>
+  );
+}
+
+function PaperRow({ paper }: { paper: Paper }) {
+  const [status, setStatus] = useState<string>('pending');
+
+  useEffect(() => {
+    // 論文詳細を取得してステータスを確認
+    const checkStatus = async () => {
+      try {
+        const res = await fetch(`http://localhost:8000/papers/${paper.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.tasks && data.tasks.length > 0) {
+            setStatus(data.tasks[0].status);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to fetch paper status:', e);
+      }
+    };
+    checkStatus();
+  }, [paper.id]);
+
+  const isCompleted = status === 'completed';
+  const isProcessing = status === 'processing' || status === 'pending';
+
+  return (
+    <tr className="hover:bg-gray-50">
+      <td className="px-6 py-4 text-sm text-gray-900">
+        {isCompleted ? (
+          <Link
+            href={`/papers/${paper.id}`}
+            className="text-blue-600 hover:underline"
+          >
+            {paper.title}
+          </Link>
+        ) : (
+          <span className="text-gray-500">{paper.title}</span>
+        )}
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+        {new Date(paper.created_at).toLocaleString('ja-JP')}
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <span
+          className={`px-2 py-1 text-xs rounded-full ${
+            status === 'completed'
+              ? 'bg-green-100 text-green-800'
+              : status === 'error'
+              ? 'bg-red-100 text-red-800'
+              : 'bg-yellow-100 text-yellow-800'
+          }`}
+        >
+          {isProcessing && <Loader2 className="w-3 h-3 inline-block mr-1 animate-spin" />}
+          {status === 'completed' ? '完了' : status === 'error' ? 'エラー' : '解析中'}
+        </span>
+      </td>
+    </tr>
   );
 }

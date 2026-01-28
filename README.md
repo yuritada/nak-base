@@ -1,74 +1,53 @@
-# nak-base
+# nak-base MVP
 
-**nakamura knowledge database** - 研究室の『集合知』で、最高の一本を。
+**論文フィードバックシステム MVP版** - PDFを投げたらAIが感想を返す
 
-論文フィードバックシステム - AIによる多層的フィードバックで論文の質を向上させます。
+## 概要
 
-## 機能
+このMVP版は、以下の「鉄の掟」に従い、**確実に動作する最小構成**を実現しています：
 
-- 論文（PDF/TeX）のアップロードとGoogle Driveへの自動保存
-- マルチエージェントAIによる「形式・論理・内容」の多層的フィードバック
-- 論文のバージョン管理と、過去の指摘を踏まえた継続的な指導
-- ゼミ全体でのナレッジ共有（過去論文のRAG検索）
+- 外部サービス依存なし（Google Drive/OAuth 廃止）
+- RAG/ベクトル検索なし（pgvector 廃止）
+- PDF座標解析なし（テキスト抽出のみ）
+- TeX対応なし（PDF単体ファイルのみ）
+- 認証簡略化（デモユーザーのみ）
 
 ## システム構成
 
 | コンテナ | 技術スタック | 役割 |
 |---------|-------------|------|
 | frontend | Next.js 14 | ユーザーインターフェース |
-| backend | FastAPI | API、認証、DB操作、Drive連携 |
-| worker | Python | AI推論、RAG処理 |
-| redis | Redis | メッセージキュー |
-| db | PostgreSQL + pgvector | メタデータ・ベクトルDB |
+| backend | FastAPI | API、認証 |
+| parser | FastAPI + pypdf | PDFからテキスト抽出 |
+| worker | Python | タスク処理、Ollama連携 |
+| ollama | Ollama | LLM (gemma2:2b) |
+| redis | Redis | シンプルなFIFOキュー |
+| db | PostgreSQL | メタデータ保存（3テーブルのみ） |
 
 ## 起動方法
 
-### 1. 事前準備
-
-#### Google Cloud設定
-
-1. Google Cloud Consoleでプロジェクトを作成
-2. Google Drive APIを有効化
-3. サービスアカウントを作成し、JSONキーをダウンロード
-4. ダウンロードしたJSONを `secrets/service-account.json` として保存
-5. Google Driveでゼミ共有フォルダを作成
-6. 共有フォルダをサービスアカウントのメールアドレスと共有（編集権限）
-
-#### Gemini API設定
-
-1. [Google AI Studio](https://makersuite.google.com/app/apikey) でAPIキーを取得
-
-### 2. 環境変数設定
+### 1. ビルド
 
 ```bash
-cp .env.example .env
+make build
 ```
 
-`.env` ファイルを編集して以下を設定：
-
-```env
-POSTGRES_USER=nakbase
-POSTGRES_PASSWORD=your-secure-password
-POSTGRES_DB=nakbase
-SECRET_KEY=your-secret-key
-GOOGLE_DRIVE_FOLDER_ID=your-google-drive-folder-id
-GEMINI_API_KEY=your-gemini-api-key
-```
-
-### 3. シークレットファイル配置
+### 2. コンテナ起動
 
 ```bash
-# secretsディレクトリにサービスアカウントのJSONを配置
-cp /path/to/your-service-account.json secrets/service-account.json
+make up
 ```
 
-### 4. 起動
+### 3. Ollamaモデルのダウンロード（初回のみ）
+
+**重要**: 初回起動時は、Ollamaのモデルダウンロードが必要です。
+これには数分〜数十分かかる場合があります。
 
 ```bash
-docker-compose up --build
+make setup-ollama
 ```
 
-### 5. アクセス
+### 4. アクセス
 
 - フロントエンド: http://localhost:3000
 - バックエンドAPI: http://localhost:8000
@@ -76,44 +55,76 @@ docker-compose up --build
 
 ## 使い方
 
-### 1. ユーザー登録
+### 1. デモログイン
 
-1. http://localhost:3000/users にアクセス
-2. 「新規ユーザー」から学生または教授を登録
+1. http://localhost:3000 にアクセス
+2. 「デモを開始する」ボタンをクリック
 
 ### 2. 論文アップロード
 
-1. http://localhost:3000/upload にアクセス
-2. ユーザーを選択
-3. 論文タイトルを入力
-4. 対象学会フォーマットを選択（DEIM, IPSJ, 一般）
-5. PDF/TeXファイルをドラッグ＆ドロップ
-6. 「アップロードして分析開始」をクリック
+1. 「アップロード」をクリック
+2. 論文タイトルを入力
+3. PDFファイルを選択
+4. 「アップロードして分析開始」をクリック
 
-### 3. フィードバック確認
+### 3. 結果確認
 
-1. http://localhost:3000/papers にアクセス
-2. 論文をクリックして詳細表示
-3. 各バージョンのスコアとフィードバックを確認
+1. 「論文一覧」で論文を確認
+2. ステータスが「完了」になったらクリック
+3. AIの分析結果（要約、誤字脱字、改善提案）を確認
 
-### 4. ダッシュボード（教授向け）
+## データベース構成（MVP版）
 
-1. http://localhost:3000/dashboard にアクセス
-2. 全学生の論文状況とスコアを一覧確認
+3テーブルのシンプルな構成：
+
+### users
+- `id`: 1（固定デモユーザー）
+- `name`: "Demo User"
+
+### papers
+- `id`, `user_id`, `title`, `created_at`
+
+### tasks
+- `id`, `paper_id`, `file_path`, `parsed_text`, `status`, `result_json`
+
+## API エンドポイント
+
+### 認証
+- `POST /auth/demo-login` - デモユーザーとしてログイン
+
+### Papers
+- `GET /papers/` - 論文一覧
+- `GET /papers/{paper_id}` - 論文詳細（タスク含む）
+- `POST /papers/upload` - 論文アップロード
+- `GET /papers/tasks/{task_id}` - タスク詳細
+
+## コマンド一覧
+
+```bash
+make help          # ヘルプ表示
+make build         # イメージビルド
+make up            # コンテナ起動
+make down          # コンテナ停止
+make restart       # 再起動
+make logs          # ログ表示
+make logs-worker   # Workerログ表示
+make logs-ollama   # Ollamaログ表示
+make ps            # ステータス確認
+make setup-ollama  # Ollamaモデルダウンロード
+make clean         # 完全クリーンアップ
+```
 
 ## ディレクトリ構成
 
 ```
 nak_base/
 ├── docker-compose.yml
-├── .env.example
+├── makefile
 ├── README.md
-├── MasterPRD.md
-├── secrets/                    # シークレットファイル
-│   └── service-account.json    # Google サービスアカウントキー
+├── .env.example
 ├── db/
-│   └── init.sql               # PostgreSQLスキーマ
-├── backend/                   # FastAPI バックエンド
+│   └── init.sql              # PostgreSQLスキーマ（3テーブル）
+├── backend/                  # FastAPI バックエンド
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── app/
@@ -123,111 +134,67 @@ nak_base/
 │       ├── models.py
 │       ├── schemas.py
 │       ├── routers/
+│       │   ├── auth.py       # デモログイン
+│       │   └── papers.py     # 論文管理
 │       └── services/
-├── worker/                    # AI推論ワーカー
+│           └── queue_service.py
+├── parser/                   # PDFパーサーサービス
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── app/
+│       └── main.py
+├── worker/                   # タスク処理ワーカー
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── app/
 │       ├── worker.py
 │       ├── config.py
 │       ├── database.py
-│       └── agents/
-│           ├── parser.py      # PDF/TeXパーサー
-│           ├── linter.py      # 形式チェックエージェント
-│           ├── logic.py       # 論理チェックエージェント
-│           ├── rag.py         # RAG検索エージェント
-│           └── diff_checker.py # 差分確認エージェント
-└── frontend/                  # Next.js フロントエンド
+│       └── models.py
+└── frontend/                 # Next.js フロントエンド
     ├── Dockerfile
     ├── package.json
     └── app/
         ├── layout.tsx
-        ├── page.tsx
-        ├── upload/
-        ├── papers/
-        ├── dashboard/
-        └── users/
-```
-
-## API エンドポイント
-
-### Users
-- `POST /users/` - ユーザー作成
-- `GET /users/` - ユーザー一覧
-- `GET /users/{user_id}` - ユーザー詳細
-
-### Papers
-- `POST /papers/` - 論文作成
-- `GET /papers/` - 論文一覧
-- `GET /papers/{paper_id}` - 論文詳細（バージョン含む）
-- `POST /papers/{paper_id}/upload` - 新バージョンアップロード
-
-### Feedbacks
-- `GET /feedbacks/version/{version_id}` - バージョンのフィードバック取得
-- `GET /feedbacks/task/{task_id}` - タスクステータス確認
-
-### Dashboard
-- `GET /dashboard/professor` - 教授用ダッシュボード
-- `GET /dashboard/student/{user_id}` - 学生用ダッシュボード
-- `GET /dashboard/conference-rules` - 学会フォーマット一覧
-
-## AI分析の内容
-
-### 1. 形式チェック（Linter Agent）
-- 誤字脱字検出
-- 文法エラー検出
-- 学会フォーマット適合性チェック
-
-### 2. 論理チェック（Logic Agent）
-- AbstractとConclusionの整合性
-- 章立ての論理的な流れ
-- 主張と根拠の対応
-
-### 3. RAG検索（RAG Agent）
-- 過去の類似論文検索
-- 新規性評価
-- 参考文献の提案
-
-### 4. 差分チェック（Diff Checker）
-- 前回の指摘の改善確認
-- 新たな問題点の検出
-
-## 開発
-
-### ローカル開発
-
-```bash
-# バックエンドのみ起動
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-
-# フロントエンドのみ起動
-cd frontend
-npm install
-npm run dev
-```
-
-### データベースリセット
-
-```bash
-docker-compose down -v
-docker-compose up --build
+        ├── page.tsx          # ログインページ
+        ├── dashboard/        # 論文一覧
+        ├── upload/           # アップロード
+        └── papers/[id]/      # 結果表示
 ```
 
 ## トラブルシューティング
 
-### Google Drive連携エラー
+### Ollamaが応答しない
 
-1. サービスアカウントのJSONが正しく配置されているか確認
-2. Drive APIが有効になっているか確認
-3. 共有フォルダがサービスアカウントと共有されているか確認
+```bash
+# Ollamaのステータス確認
+docker logs nak_base_ollama
 
-### AI分析が完了しない
+# モデルが正しくダウンロードされているか確認
+docker exec nak_base_ollama ollama list
+```
 
-1. Gemini APIキーが正しく設定されているか確認
-2. `docker logs nak_base_worker` でワーカーのログを確認
-3. Redisが正常に動作しているか確認
+### Workerが処理しない
+
+```bash
+# Workerログを確認
+make logs-worker
+```
+
+### データベースをリセットしたい
+
+```bash
+make clean
+make build
+make up
+make setup-ollama
+```
+
+## 注意事項
+
+- **初回起動時**: Ollamaのモデルダウンロードに時間がかかります（数分〜数十分）
+- **再起動時**: `restart: always` が設定されているため、エラー時は自動復旧します
+- **ファイル保存**: PDFはUUIDで一意なファイル名で保存されます
 
 ## ライセンス
 

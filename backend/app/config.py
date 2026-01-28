@@ -7,9 +7,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     secret_key: str = "your-secret-key-change-in-production"
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
-    google_drive_folder_id: str = ""
-    google_application_credentials: str = "/app/secrets/service-account.json"
+    access_token_expire_minutes: int = 60 * 24  # 24時間
+    storage_path: str = "/storage"
+    debug_mode: bool = False
 
     class Config:
         env_file = ".env"

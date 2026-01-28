@@ -1,6 +1,5 @@
 """
-MVP版 データモデル
-シンプルな3テーブル構成: users, papers, tasks
+MVP版 Worker用データモデル
 """
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, CheckConstraint
 from sqlalchemy.dialects.postgresql import JSONB
@@ -10,7 +9,6 @@ from .database import Base
 
 
 class User(Base):
-    """デモユーザー用テーブル（id=1のみ）"""
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -20,7 +18,6 @@ class User(Base):
 
 
 class Paper(Base):
-    """論文メタデータ"""
     __tablename__ = "papers"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -33,7 +30,6 @@ class Paper(Base):
 
 
 class Task(Base):
-    """タスク（versions + inference_tasks + feedbacksを統合）"""
     __tablename__ = "tasks"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -46,7 +42,3 @@ class Task(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     paper = relationship("Paper", back_populates="tasks")
-
-    __table_args__ = (
-        CheckConstraint(status.in_(['pending', 'processing', 'completed', 'error']), name='check_task_status'),
-    )

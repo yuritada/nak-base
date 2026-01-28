@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'nak-base - 論文フィードバックシステム',
-  description: '研究室の「集合知」で、最高の一本を。',
+  title: 'nak-base - 論文フィードバックシステム MVP',
+  description: 'PDFを投げたらAIが感想を返す',
 }
 
 export default function RootLayout({
@@ -22,14 +22,11 @@ export default function RootLayout({
                   nak-base
                 </a>
                 <span className="ml-2 text-sm text-gray-500">
-                  論文フィードバックシステム
+                  MVP
                 </span>
               </div>
               <div className="flex items-center space-x-4">
                 <a href="/dashboard" className="text-gray-600 hover:text-gray-900">
-                  ダッシュボード
-                </a>
-                <a href="/papers" className="text-gray-600 hover:text-gray-900">
                   論文一覧
                 </a>
                 <a href="/upload" className="text-gray-600 hover:text-gray-900">

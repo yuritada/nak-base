@@ -1,28 +1,36 @@
-# 変数定義
+# nak-base MVP
 COMPOSE = docker-compose
 
-.PHONY: help up build down restart clean logs ps
+.PHONY: help up build down restart clean logs ps setup-ollama
 
-# デフォルトのターゲット（helpを表示）
+# デフォルトのターゲット
 help:
-	@echo "使用可能なコマンド:"
-	@echo "  make up      - コンテナをバックグラウンドで起動します"
-	@echo "  make build   - キャッシュを使用せずにイメージをビルドします"
-	@echo "  make down    - コンテナとネットワークを停止・削除します"
-	@echo "  make restart - コンテナを再起動します"
-	@echo "  make clean   - コンテナ、ボリューム、プロジェクト関連イメージ、ビルドキャッシュを完全に削除します"
-	@echo "  make logs    - コンテナのログをリアルタイムで表示します"
-	@echo "  make ps      - コンテナの稼働状態を表示します"
+	@echo "nak-base MVP - 使用可能なコマンド:"
+	@echo ""
+	@echo "  make up           - コンテナをバックグラウンドで起動"
+	@echo "  make build        - キャッシュなしでイメージをビルド"
+	@echo "  make down         - コンテナを停止"
+	@echo "  make restart      - コンテナを再起動"
+	@echo "  make clean        - コンテナ、ボリューム、イメージを完全削除"
+	@echo "  make logs         - ログをリアルタイム表示"
+	@echo "  make ps           - コンテナ状態を表示"
+	@echo "  make setup-ollama - Ollamaモデルをダウンロード（初回のみ）"
+	@echo ""
+	@echo "初回セットアップ手順:"
+	@echo "  1. make build"
+	@echo "  2. make up"
+	@echo "  3. make setup-ollama"
+	@echo "  4. http://localhost:3000 にアクセス"
 
 # コンテナの起動
 up:
 	$(COMPOSE) up -d
 
-# イメージのビルド（確実を期すため --no-cache を付与）
+# イメージのビルド
 build:
 	$(COMPOSE) build --no-cache
 
-# コンテナの停止と削除
+# コンテナの停止
 down:
 	$(COMPOSE) down
 
@@ -32,19 +40,32 @@ restart:
 	$(COMPOSE) up -d
 
 # 強力なクリーンアップ
-# --volumes: 名前付きボリュームも削除
-# --rmi all: プロジェクトで使用されているすべてのイメージを削除
-# --remove-orphans: 定義外のコンテナも削除
-# docker builder prune: ビルドキャッシュを削除
 clean:
 	$(COMPOSE) down --volumes --rmi all --remove-orphans
 	docker builder prune -f
-	@echo "プロジェクトのキャッシュ、イメージ、ボリュームを完全に削除しました。"
+	@echo "完全クリーンアップ完了"
 
 # ログの表示
 logs:
 	$(COMPOSE) logs -f
 
+# 特定サービスのログ
+logs-backend:
+	$(COMPOSE) logs -f backend
+
+logs-worker:
+	$(COMPOSE) logs -f worker
+
+logs-ollama:
+	$(COMPOSE) logs -f ollama
+
 # ステータス確認
 ps:
 	$(COMPOSE) ps
+
+# Ollamaモデルのセットアップ（初回のみ必要）
+setup-ollama:
+	@echo "Ollamaにgemma2:2bモデルをダウンロード中..."
+	@echo "これには数分かかる場合があります..."
+	docker exec nak_base_ollama ollama pull gemma2:2b
+	@echo "モデルのダウンロード完了！"

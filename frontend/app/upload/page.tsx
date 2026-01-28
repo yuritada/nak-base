@@ -1,75 +1,52 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
-import { useDropzone } from 'react-dropzone';
+import { useState, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { Upload, FileText, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
-import { createPaper, uploadPaperVersion, getTaskStatus, getConferenceRules, getUsers, type ConferenceRule, type User } from '@/lib/api';
+import { uploadPaper, getTask } from '@/lib/api';
 
 type UploadStatus = 'idle' | 'uploading' | 'processing' | 'completed' | 'error';
 
 export default function UploadPage() {
+  const router = useRouter();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
-  const [conferenceRule, setConferenceRule] = useState('GENERAL');
-  const [userId, setUserId] = useState<number | null>(null);
   const [status, setStatus] = useState<UploadStatus>('idle');
-  const [taskId, setTaskId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [conferenceRules, setConferenceRules] = useState<ConferenceRule[]>([]);
-  const [users, setUsers] = useState<User[]>([]);
 
-  useEffect(() => {
-    getConferenceRules().then(setConferenceRules).catch(console.error);
-    getUsers().then(setUsers).catch(console.error);
-  }, []);
-
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    if (acceptedFiles.length > 0) {
-      const f = acceptedFiles[0];
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const f = e.target.files[0];
       setFile(f);
       if (!title) {
-        setTitle(f.name.replace(/\.(pdf|tex)$/i, ''));
+        setTitle(f.name.replace(/\.pdf$/i, ''));
       }
     }
-  }, [title]);
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: {
-      'application/pdf': ['.pdf'],
-      'application/x-tex': ['.tex'],
-      'text/x-tex': ['.tex'],
-    },
-    maxFiles: 1,
-  });
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file || !title || !userId) return;
+    if (!file || !title) return;
 
     setStatus('uploading');
     setError(null);
 
     try {
-      // Create paper
-      const paper = await createPaper(userId, { title, target_conference: conferenceRule });
-
-      // Upload file
-      const result = await uploadPaperVersion(paper.paper_id, file, conferenceRule);
-      setTaskId(result.task_id);
+      const result = await uploadPaper(title, file);
       setStatus('processing');
 
-      // Poll for completion
+      // ポーリングで完了を待つ
       const pollInterval = setInterval(async () => {
         try {
-          const taskStatus = await getTaskStatus(result.task_id);
-          if (taskStatus.status === 'Completed') {
+          const task = await getTask(result.task_id);
+          if (task.status === 'completed') {
             clearInterval(pollInterval);
             setStatus('completed');
-          } else if (taskStatus.status === 'Error') {
+          } else if (task.status === 'error') {
             clearInterval(pollInterval);
             setStatus('error');
-            setError(taskStatus.error_message || 'An error occurred');
+            setError(task.result_json?.error || 'エラーが発生しました');
           }
         } catch (err) {
           console.error('Poll error:', err);
@@ -78,7 +55,7 @@ export default function UploadPage() {
 
     } catch (err) {
       setStatus('error');
-      setError(err instanceof Error ? err.message : 'Upload failed');
+      setError(err instanceof Error ? err.message : 'アップロードに失敗しました');
     }
   };
 
@@ -95,7 +72,7 @@ export default function UploadPage() {
         return (
           <div className="flex items-center text-yellow-600">
             <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-            AI分析中... (タスクID: {taskId})
+            AI分析中...
           </div>
         );
       case 'completed':
@@ -118,29 +95,10 @@ export default function UploadPage() {
   };
 
   return (
-    <div className="max-w-2xl mx-auto">
+    <div className="max-w-lg mx-auto">
       <h1 className="text-2xl font-bold mb-6">論文アップロード</h1>
 
-      <form onSubmit={handleSubmit} className="space-y-6">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            ユーザー選択
-          </label>
-          <select
-            value={userId || ''}
-            onChange={(e) => setUserId(Number(e.target.value))}
-            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            required
-          >
-            <option value="">ユーザーを選択...</option>
-            {users.map((user) => (
-              <option key={user.user_id} value={user.user_id}>
-                {user.name} ({user.role})
-              </option>
-            ))}
-          </select>
-        </div>
-
+      <form onSubmit={handleSubmit} className="space-y-6 bg-white p-6 rounded-lg shadow-sm border">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
             論文タイトル
@@ -157,32 +115,20 @@ export default function UploadPage() {
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            対象学会フォーマット
+            PDFファイル
           </label>
-          <select
-            value={conferenceRule}
-            onChange={(e) => setConferenceRule(e.target.value)}
-            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          <input
+            type="file"
+            ref={fileInputRef}
+            accept=".pdf"
+            onChange={handleFileChange}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full border-2 border-dashed rounded-lg p-8 text-center cursor-pointer hover:border-gray-400 transition-colors"
           >
-            {conferenceRules.map((rule) => (
-              <option key={rule.rule_id} value={rule.rule_id}>
-                {rule.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            ファイル選択
-          </label>
-          <div
-            {...getRootProps()}
-            className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
-              isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'
-            }`}
-          >
-            <input {...getInputProps()} />
             {file ? (
               <div className="flex items-center justify-center">
                 <FileText className="w-8 h-8 text-blue-500 mr-3" />
@@ -191,15 +137,10 @@ export default function UploadPage() {
             ) : (
               <div>
                 <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                <p className="text-gray-600">
-                  ファイルをドラッグ＆ドロップ、またはクリックして選択
-                </p>
-                <p className="text-sm text-gray-400 mt-2">
-                  PDF または TeX ファイル
-                </p>
+                <p className="text-gray-600">クリックしてPDFファイルを選択</p>
               </div>
             )}
-          </div>
+          </button>
         </div>
 
         {status !== 'idle' && (
@@ -210,7 +151,7 @@ export default function UploadPage() {
 
         <button
           type="submit"
-          disabled={!file || !title || !userId || status === 'uploading' || status === 'processing'}
+          disabled={!file || !title || status === 'uploading' || status === 'processing'}
           className="w-full py-3 px-4 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
         >
           アップロードして分析開始
@@ -221,9 +162,12 @@ export default function UploadPage() {
         <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-lg">
           <p className="text-green-800">
             分析が完了しました。
-            <a href="/papers" className="underline ml-2">
+            <button
+              onClick={() => router.push('/dashboard')}
+              className="underline ml-2"
+            >
               論文一覧で結果を確認
-            </a>
+            </button>
           </p>
         </div>
       )}
