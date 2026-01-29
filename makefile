@@ -1,7 +1,7 @@
 # nak-base MVP
 COMPOSE = docker-compose
 
-.PHONY: help up build down restart clean logs ps setup-ollama
+.PHONY: help up build down restart clean logs ps setup-ollama debug-up debug-down test
 
 # デフォルトのターゲット
 help:
@@ -16,13 +16,18 @@ help:
 	@echo "  make ps           - コンテナ状態を表示"
 	@echo "  make setup-ollama - Ollamaモデルをダウンロード（初回のみ）"
 	@echo ""
+	@echo "デバッグ用コマンド:"
+	@echo "  make debug-up     - デバッグモードで起動（テストコード含む）"
+	@echo "  make debug-down   - デバッグモードを停止"
+	@echo "  make test         - システム診断を実行"
+	@echo ""
 	@echo "初回セットアップ手順:"
 	@echo "  1. make build"
 	@echo "  2. make up"
 	@echo "  3. make setup-ollama"
 	@echo "  4. http://localhost:3000 にアクセス"
 
-# コンテナの起動
+# コンテナの起動（本番モード）
 up:
 	$(COMPOSE) up -d
 
@@ -70,3 +75,36 @@ setup-ollama:
 	@echo "これには数分かかる場合があります..."
 	docker exec nak_base_ollama ollama pull gemma2:2b
 	@echo "モデルのダウンロード完了！"
+
+# ===========================================
+# Debug Mode Commands
+# ===========================================
+
+# デバッグモードで起動（テストコードをマウント）
+debug-up:
+	@echo "デバッグモードで起動中..."
+	@mkdir -p logs
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.debug.yml up -d
+	@echo ""
+	@echo "デバッグモードで起動しました。"
+	@echo "テストを実行するには: make test"
+
+# デバッグモードを停止
+debug-down:
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.debug.yml down
+
+# システム診断を実行（デバッグモード専用）
+test:
+	@echo "=============================================="
+	@echo " Running System Diagnosis..."
+	@echo "=============================================="
+	@docker compose exec backend python /app/tests/run_diagnosis.py || \
+		(echo ""; echo "ERROR: テスト実行に失敗しました。"; \
+		 echo "デバッグモードで起動していますか？ (make debug-up)"; \
+		 exit 1)
+	@echo ""
+	@echo "診断結果は logs/system_diagnosis.log に保存されました。"
+
+# 診断ログを表示
+show-diagnosis:
+	@cat logs/system_diagnosis.log 2>/dev/null || echo "診断ログが見つかりません。make test を実行してください。"

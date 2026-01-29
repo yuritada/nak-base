@@ -39,3 +39,7 @@ Thumbs.db
 *.sqlite
 
 logs.txt
+
+# Diagnosis logs
+logs/
+!logs/.gitkeep
