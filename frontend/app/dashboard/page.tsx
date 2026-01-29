@@ -1,31 +1,63 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { FileText, Loader2, Plus } from 'lucide-react';
-import { getPapers, type Paper } from '@/lib/api';
+import { FileText, Loader2, Plus, RefreshCw, WifiOff } from 'lucide-react';
+import { getPapers } from '@/lib/api';
+import { useSSE } from '@/hooks';
+import type { Paper, TaskStatusEnum, SSENotificationEvent } from '@/types';
+import { getTaskStatusDisplay, getPaperStatusDisplay } from '@/types';
+
+interface PaperWithTaskInfo extends Paper {
+  taskStatus?: TaskStatusEnum;
+  taskPhase?: string;
+  taskId?: number;
+}
 
 export default function DashboardPage() {
-  const [papers, setPapers] = useState<Paper[]>([]);
+  const [papers, setPapers] = useState<PaperWithTaskInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const papersRef = useRef<PaperWithTaskInfo[]>([]);
 
-  const fetchPapers = async () => {
+  const handleSSEMessage = useCallback((event: SSENotificationEvent) => {
+    setPapers((prev) =>
+      prev.map((paper) => {
+        if (paper.taskId === event.task_id) {
+          return {
+            ...paper,
+            taskStatus: event.status,
+            taskPhase: event.phase,
+          };
+        }
+        return paper;
+      })
+    );
+  }, []);
+
+  const { isConnected, error: sseError } = useSSE({
+    onMessage: handleSSEMessage,
+  });
+
+  const fetchPapers = useCallback(async () => {
     try {
       const data = await getPapers();
-      setPapers(data);
+      const papersWithInfo: PaperWithTaskInfo[] = data.map((paper) => ({
+        ...paper,
+        taskStatus: undefined,
+        taskPhase: undefined,
+      }));
+      setPapers(papersWithInfo);
+      papersRef.current = papersWithInfo;
     } catch (e) {
       console.error('Failed to fetch papers:', e);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchPapers();
-    // 3秒ごとにポーリング
-    const interval = setInterval(fetchPapers, 3000);
-    return () => clearInterval(interval);
-  }, []);
+  }, [fetchPapers]);
 
   if (loading) {
     return (
@@ -38,25 +70,45 @@ export default function DashboardPage() {
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold">論文一覧</h1>
-        <Link
-          href="/upload"
-          className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-        >
-          <Plus className="w-5 h-5 mr-2" />
-          アップロード
-        </Link>
+        <div className="flex items-center gap-4">
+          <h1 className="text-2xl font-bold">論文一覧</h1>
+          {!isConnected && (
+            <span className="flex items-center text-sm text-yellow-600">
+              <WifiOff className="w-4 h-4 mr-1" />
+              オフライン
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={fetchPapers}
+            className="flex items-center px-3 py-2 text-gray-600 hover:text-gray-900 rounded-lg hover:bg-gray-100"
+            title="更新"
+          >
+            <RefreshCw className="w-5 h-5" />
+          </button>
+          <Link
+            href="/upload"
+            className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
+            <Plus className="w-5 h-5 mr-2" />
+            アップロード
+          </Link>
+        </div>
       </div>
+
+      {sseError && (
+        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 text-sm">
+          {sseError}
+        </div>
+      )}
 
       <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
         {papers.length === 0 ? (
           <div className="px-6 py-12 text-center">
             <FileText className="w-12 h-12 text-gray-300 mx-auto mb-4" />
             <p className="text-gray-500 mb-4">まだ論文がありません</p>
-            <Link
-              href="/upload"
-              className="text-blue-600 hover:underline"
-            >
+            <Link href="/upload" className="text-blue-600 hover:underline">
               最初の論文をアップロードする
             </Link>
           </div>
@@ -77,7 +129,7 @@ export default function DashboardPage() {
             </thead>
             <tbody className="divide-y divide-gray-200">
               {papers.map((paper) => (
-                <PaperRow key={paper.id} paper={paper} />
+                <PaperRow key={paper.paper_id} paper={paper} />
               ))}
             </tbody>
           </table>
@@ -87,36 +139,28 @@ export default function DashboardPage() {
   );
 }
 
-function PaperRow({ paper }: { paper: Paper }) {
-  const [status, setStatus] = useState<string>('pending');
+function PaperRow({ paper }: { paper: PaperWithTaskInfo }) {
+  const statusDisplay = paper.taskStatus
+    ? getTaskStatusDisplay(paper.taskStatus, paper.taskPhase)
+    : getPaperStatusDisplay(paper.status);
 
-  useEffect(() => {
-    // 論文詳細を取得してステータスを確認
-    const checkStatus = async () => {
-      try {
-        const res = await fetch(`http://localhost:8000/papers/${paper.id}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.tasks && data.tasks.length > 0) {
-            setStatus(data.tasks[0].status);
-          }
-        }
-      } catch (e) {
-        console.error('Failed to fetch paper status:', e);
-      }
-    };
-    checkStatus();
-  }, [paper.id]);
+  const isCompleted = paper.status === 'COMPLETED';
+  const isProcessing = statusDisplay.isLoading;
 
-  const isCompleted = status === 'completed';
-  const isProcessing = status === 'processing' || status === 'pending';
+  const colorClasses = {
+    green: 'bg-green-100 text-green-800',
+    yellow: 'bg-yellow-100 text-yellow-800',
+    red: 'bg-red-100 text-red-800',
+    blue: 'bg-blue-100 text-blue-800',
+    gray: 'bg-gray-100 text-gray-800',
+  };
 
   return (
     <tr className="hover:bg-gray-50">
       <td className="px-6 py-4 text-sm text-gray-900">
         {isCompleted ? (
           <Link
-            href={`/papers/${paper.id}`}
+            href={`/papers/${paper.paper_id}`}
             className="text-blue-600 hover:underline"
           >
             {paper.title}
@@ -126,20 +170,12 @@ function PaperRow({ paper }: { paper: Paper }) {
         )}
       </td>
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-        {new Date(paper.created_at).toLocaleString('ja-JP')}
+        {paper.created_at ? new Date(paper.created_at).toLocaleString('ja-JP') : '-'}
       </td>
       <td className="px-6 py-4 whitespace-nowrap">
-        <span
-          className={`px-2 py-1 text-xs rounded-full ${
-            status === 'completed'
-              ? 'bg-green-100 text-green-800'
-              : status === 'error'
-              ? 'bg-red-100 text-red-800'
-              : 'bg-yellow-100 text-yellow-800'
-          }`}
-        >
+        <span className={`px-2 py-1 text-xs rounded-full ${colorClasses[statusDisplay.color]}`}>
           {isProcessing && <Loader2 className="w-3 h-3 inline-block mr-1 animate-spin" />}
-          {status === 'completed' ? '完了' : status === 'error' ? 'エラー' : '解析中'}
+          {statusDisplay.label}
         </span>
       </td>
     </tr>

@@ -1,77 +1,109 @@
 /**
- * MVP版 API Client
- * シンプルなAPI関数
+ * nak-base API Client
+ * Phase 1.5: 新モデル構造対応
  */
+
+import type {
+  Paper,
+  PaperDetail,
+  InferenceTask,
+  UploadResponse,
+  Version,
+  Feedback,
+} from '@/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-export interface Paper {
-  id: number;
-  user_id: number;
-  title: string;
-  created_at: string;
+// ================== Helper Functions ==================
+
+async function handleResponse<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `HTTP ${res.status}`);
+  }
+  return res.json();
 }
 
-export interface Task {
-  id: number;
-  paper_id: number;
-  file_path: string;
-  parsed_text: string | null;
-  status: 'pending' | 'processing' | 'completed' | 'error';
-  result_json: {
-    summary?: string;
-    typos?: string[];
-    suggestions?: string[];
-    error?: string;
-  } | null;
-  created_at: string;
-  updated_at: string;
-}
+// ================== Auth API ==================
 
-export interface PaperWithTasks extends Paper {
-  tasks: Task[];
-}
-
-// Auth API
 export async function demoLogin(): Promise<{ access_token: string }> {
   const res = await fetch(`${API_URL}/auth/demo-login`, {
     method: 'POST',
   });
-  if (!res.ok) throw new Error('Login failed');
-  return res.json();
+  return handleResponse(res);
 }
 
-// Papers API
+// ================== Papers API ==================
+
 export async function getPapers(): Promise<Paper[]> {
   const res = await fetch(`${API_URL}/papers/`);
-  if (!res.ok) throw new Error('Failed to fetch papers');
-  return res.json();
+  return handleResponse(res);
 }
 
-export async function getPaper(paperId: number): Promise<PaperWithTasks> {
+export async function getPaper(paperId: number): Promise<PaperDetail> {
   const res = await fetch(`${API_URL}/papers/${paperId}`);
-  if (!res.ok) throw new Error('Failed to fetch paper');
-  return res.json();
+  return handleResponse(res);
 }
 
-export async function uploadPaper(
-  title: string,
-  file: File
-): Promise<{ message: string; paper_id: number; task_id: number }> {
+export async function deletePaper(paperId: number): Promise<{ message: string; paper_id: number }> {
+  const res = await fetch(`${API_URL}/papers/${paperId}`, {
+    method: 'DELETE',
+  });
+  return handleResponse(res);
+}
+
+// ================== Versions API ==================
+
+export async function getVersions(paperId: number): Promise<Version[]> {
+  const res = await fetch(`${API_URL}/papers/${paperId}/versions`);
+  return handleResponse(res);
+}
+
+// ================== Upload API ==================
+
+export interface UploadOptions {
+  title: string;
+  file: File;
+  isReference?: boolean;
+}
+
+export async function uploadPaper(options: UploadOptions): Promise<UploadResponse> {
+  const { title, file, isReference = false } = options;
+
   const formData = new FormData();
   formData.append('title', title);
   formData.append('file', file);
+
+  if (isReference) {
+    formData.append('is_reference', 'true');
+  }
 
   const res = await fetch(`${API_URL}/papers/upload`, {
     method: 'POST',
     body: formData,
   });
-  if (!res.ok) throw new Error('Failed to upload file');
-  return res.json();
+  return handleResponse(res);
 }
 
-export async function getTask(taskId: number): Promise<Task> {
+// ================== Tasks API ==================
+
+export async function getTask(taskId: number): Promise<InferenceTask> {
   const res = await fetch(`${API_URL}/papers/tasks/${taskId}`);
-  if (!res.ok) throw new Error('Failed to fetch task');
-  return res.json();
+  return handleResponse(res);
 }
+
+// ================== Feedback API ==================
+
+export async function getFeedback(versionId: number): Promise<Feedback | null> {
+  try {
+    const res = await fetch(`${API_URL}/papers/versions/${versionId}/feedback`);
+    if (res.status === 404) return null;
+    return handleResponse(res);
+  } catch {
+    return null;
+  }
+}
+
+// ================== Type Re-exports ==================
+
+export type { Paper, PaperDetail, InferenceTask, UploadResponse, Version, Feedback };
