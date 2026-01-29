@@ -27,11 +27,11 @@ OLLAMA_PROMPT = """以下の論文のテキストを分析し、JSON形式で回
 3. 改善提案（suggestions）: 論文を改善するための具体的な提案
 
 ## 出力形式（JSON）
-{
+{{
   "summary": "論文の要約...",
   "typos": ["誤字1", "誤字2"],
   "suggestions": ["提案1", "提案2", "提案3"]
-}
+}}
 
 ## 論文テキスト
 {text}
@@ -43,15 +43,38 @@ def get_redis_client():
     return redis.from_url(settings.redis_url)
 
 
-def call_parser(file_path: str) -> str:
-    """Parserサービスを呼び出してテキスト抽出"""
+def call_parser(file_path: str) -> dict:
+    """
+    Parserサービスを呼び出してテキスト抽出
+    Phase 1-2: 新形式（content, meta, pages, chunks）に対応
+    """
     response = requests.post(
         f"{settings.parser_url}/parse",
         json={"file_path": file_path},
-        timeout=60
+        timeout=120  # ZIP/TeX処理は時間がかかる場合がある
     )
     response.raise_for_status()
-    return response.json()["text"]
+    result = response.json()
+
+    # 新形式: content フィールドを使用
+    # 旧形式（legacy）との互換性: text フィールドもチェック
+    if "content" in result:
+        return {
+            "text": result["content"],
+            "meta": result.get("meta", {}),
+            "pages": result.get("pages", []),
+            "chunks": result.get("chunks", [])
+        }
+    elif "text" in result:
+        # Legacy形式
+        return {
+            "text": result["text"],
+            "meta": {},
+            "pages": [],
+            "chunks": []
+        }
+    else:
+        raise ValueError("Parser response missing both 'content' and 'text' fields")
 
 
 def call_ollama(text: str) -> dict:
@@ -220,9 +243,13 @@ def process_task(task_id: int):
         if settings.debug_mode:
             print(f"【デバッグ】Parserコンテナへテキスト抽出を依頼中... (Path: {file_path})")
         print("Calling Parser service...")
-        parsed_text = call_parser(file_path)
+        parse_result = call_parser(file_path)
+        parsed_text = parse_result["text"]
+        parse_meta = parse_result.get("meta", {})
         if settings.debug_mode:
             print(f"【デバッグ】Parserより受領。抽出文字数: {len(parsed_text)}文字")
+            if parse_meta:
+                print(f"【デバッグ】ファイル種別: {parse_meta.get('file_type', 'unknown')}, ページ数: {parse_meta.get('num_pages', 0)}")
         print(f"Parsed text length: {len(parsed_text)}")
 
         # ステータス更新: LLM

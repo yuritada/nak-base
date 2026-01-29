@@ -2,8 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies for pymupdf and general processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libc-dev \
+    libffi-dev \
+    libmupdf-dev \
+    mupdf-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

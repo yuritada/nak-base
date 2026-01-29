@@ -1,7 +1,7 @@
 # nak-base MVP
 COMPOSE = docker-compose
 
-.PHONY: help up build down restart clean logs ps setup-ollama debug-up debug-down test
+.PHONY: help up build down restart clean logs ps setup-ollama debug-up debug-down test test-parser
 
 # デフォルトのターゲット
 help:
@@ -20,6 +20,7 @@ help:
 	@echo "  make debug-up     - デバッグモードで起動（テストコード含む）"
 	@echo "  make debug-down   - デバッグモードを停止"
 	@echo "  make test         - システム診断を実行"
+	@echo "  make test-parser  - Parser高度機能テスト（Phase 1-2）"
 	@echo ""
 	@echo "初回セットアップ手順:"
 	@echo "  1. make build"
@@ -140,3 +141,12 @@ test:
 # 診断ログを表示
 show-diagnosis:
 	@cat logs/system_diagnosis.log 2>/dev/null || echo "診断ログが見つかりません。make test を実行してください。"
+
+# Parser Service テスト（Phase 1-2）
+test-parser:
+	@echo "=============================================="
+	@echo " Running Parser Advanced Tests..."
+	@echo "=============================================="
+	@docker compose exec backend pip install requests > /dev/null 2>&1
+	@docker compose exec backend python /app/tests/test_parser_advanced.py || \
+		(echo ""; echo "ERROR: Parser tests failed."; exit 1)

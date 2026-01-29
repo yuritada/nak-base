@@ -1,6 +1,6 @@
 """
 論文ルーター
-Phase 1-1: 新モデル構造対応
+Phase 1-2: ZIP/TeX対応
 """
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -68,13 +68,29 @@ async def upload_paper(
     if settings.debug_mode:
         print(f"【デバッグ】論文アップロード受信: タイトル='{title}', ファイル='{file.filename}'")
 
-    # PDFのみ受付
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+    # PDF, ZIP, TeXを受付
+    lower_filename = file.filename.lower()
+    allowed_extensions = ('.pdf', '.zip', '.tex')
+    if not any(lower_filename.endswith(ext) for ext in allowed_extensions):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only PDF, ZIP, and TeX files are accepted. Got: {file.filename}"
+        )
+
+    # ファイル拡張子を取得してFileRoleを決定
+    if lower_filename.endswith('.pdf'):
+        file_ext = '.pdf'
+        file_role = FileRole.MAIN_PDF
+    elif lower_filename.endswith('.zip'):
+        file_ext = '.zip'
+        file_role = FileRole.SOURCE_TEX  # ZIPはソースファイルとして扱う
+    else:  # .tex
+        file_ext = '.tex'
+        file_role = FileRole.SOURCE_TEX
 
     # ファイル保存（UUIDで一意なファイル名）
     file_uuid = str(uuid.uuid4())
-    file_name = f"{file_uuid}.pdf"
+    file_name = f"{file_uuid}{file_ext}"
     file_path = os.path.join(settings.storage_path, file_name)
 
     # ストレージディレクトリ確認
@@ -116,7 +132,7 @@ async def upload_paper(
     # 3. File作成
     file_record = FileModel(
         version_id=version.version_id,
-        file_role=FileRole.MAIN_PDF,
+        file_role=file_role,
         is_primary=True,
         cache_path=file_path,
         is_cached=True,
