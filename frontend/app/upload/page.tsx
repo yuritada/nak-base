@@ -26,7 +26,7 @@ export default function UploadPage() {
       const f = e.target.files[0];
       setFile(f);
       if (!title) {
-        setTitle(f.name.replace(/\.(pdf|zip|tex)$/i, ''));
+        setTitle(f.name.replace(/\.(pdf|zip|tex|docx)$/i, ''));
       }
     }
   };
@@ -158,12 +158,12 @@ export default function UploadPage() {
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            ファイル（PDF / ZIP / TeX）
+            ファイル（PDF / ZIP / TeX / DOCX）
           </label>
           <input
             type="file"
             ref={fileInputRef}
-            accept=".pdf,.zip,.tex"
+            accept=".pdf,.zip,.tex,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             onChange={handleFileChange}
             className="hidden"
           />
@@ -181,7 +181,7 @@ export default function UploadPage() {
               <div>
                 <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
                 <p className="text-gray-600">クリックしてファイルを選択</p>
-                <p className="text-gray-400 text-sm mt-2">PDF, ZIP, TeXに対応</p>
+                <p className="text-gray-400 text-sm mt-2">PDF, ZIP, TeX, DOCXに対応</p>
               </div>
             )}
           </button>

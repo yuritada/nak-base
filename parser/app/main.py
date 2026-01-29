@@ -17,12 +17,13 @@ from .schemas import (
 )
 from .services.pdf_parser import PDFParser
 from .services.archive_parser import ArchiveParser
+from .services.docx_parser import DOCXParser
 
 
 app = FastAPI(
     title="nak-base Parser Service",
     description="Advanced document parsing with coordinate extraction and structure analysis",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 # Debug mode
@@ -31,6 +32,7 @@ DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 # Initialize parsers
 pdf_parser = PDFParser(debug=DEBUG_MODE)
 archive_parser = ArchiveParser(debug=DEBUG_MODE)
+docx_parser = DOCXParser(debug=DEBUG_MODE)
 
 
 @app.get("/")
@@ -38,8 +40,8 @@ def root():
     return {
         "status": "ok",
         "service": "parser",
-        "version": "2.0.0",
-        "features": ["pdf", "tex", "zip", "bbox", "chunks"]
+        "version": "2.1.0",
+        "features": ["pdf", "tex", "zip", "docx", "bbox", "chunks"]
     }
 
 
@@ -99,6 +101,9 @@ def parse_document(
 
         elif actual_type == FileType.TEX:
             return archive_parser.parse_tex(file_path)
+
+        elif actual_type == FileType.DOCX:
+            return docx_parser.parse(file_path)
 
         else:
             raise HTTPException(
@@ -169,6 +174,8 @@ def _detect_file_type(file_path: str) -> FileType:
         return FileType.ZIP
     elif lower_path.endswith('.tex'):
         return FileType.TEX
+    elif lower_path.endswith('.docx'):
+        return FileType.DOCX
     else:
         # Default to PDF for unknown types
         return FileType.PDF

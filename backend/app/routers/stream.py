@@ -1,12 +1,12 @@
 """
 SSEストリーミングルーター
-Phase 1.5: sse-starletteによるリアルタイム通知
+Phase 1.5: sse-starletteによるリアルタイム通知 (Async Redis版)
 """
 import asyncio
 import json
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
-from ..services.queue_service import get_redis_client
+from redis import asyncio as aioredis  # 非同期ライブラリを使用
 from ..config import get_settings
 
 router = APIRouter(prefix="/api/stream", tags=["stream"])
@@ -15,15 +15,18 @@ settings = get_settings()
 # Redis Pub/Sub チャンネル名
 NOTIFICATION_CHANNEL = "task_notifications"
 
+async def get_async_redis_client():
+    """SSE専用の非同期Redisクライアント"""
+    return await aioredis.from_url(settings.redis_url, decode_responses=True)
 
 async def event_generator(request: Request):
     """
     SSEイベントジェネレーター
-    Redis Pub/Subからメッセージを受信してクライアントにストリーミング
+    非同期Redisを使用してサーバーをブロックせずに待機
     """
-    client = get_redis_client()
+    client = await get_async_redis_client()
     pubsub = client.pubsub()
-    pubsub.subscribe(NOTIFICATION_CHANNEL)
+    await pubsub.subscribe(NOTIFICATION_CHANNEL)
 
     try:
         while True:
@@ -31,57 +34,44 @@ async def event_generator(request: Request):
             if await request.is_disconnected():
                 break
 
-            message = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
+            # 非同期でメッセージを取得（ここでサーバー全体の処理を止めない）
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
+            
             if message and message["type"] == "message":
                 data = message["data"]
+                # decode_responses=Trueにしているのでbytes変換不要な場合が多いが念のため
                 if isinstance(data, bytes):
                     data = data.decode("utf-8")
+                
+                # sse-starletteはdictを渡すと自動でフォーマットしてくれる
                 yield {
                     "event": "message",
                     "data": data
                 }
             else:
-                # Keep-alive ping（15秒ごと）
-                yield {
-                    "event": "ping",
-                    "data": ""
-                }
+                # Keep-alive ping（データがない時だけ送る必要はないが、接続維持のため）
+                # sse-starletteのping引数に任せる手もあるが、手動yieldの方が確実な場合も
+                pass
 
-            await asyncio.sleep(0.5)
+            # ループのCPU占有を防ぐための微小待機
+            await asyncio.sleep(0.1)
 
     except asyncio.CancelledError:
-        pass
+        print("SSE Client disconnected")
+    except Exception as e:
+        print(f"SSE Error: {e}")
     finally:
-        pubsub.unsubscribe(NOTIFICATION_CHANNEL)
-        pubsub.close()
-
+        await pubsub.unsubscribe(NOTIFICATION_CHANNEL)
+        await pubsub.close()
+        await client.aclose() # クライアントも閉じる
 
 @router.get("/notifications")
 async def stream_notifications(request: Request):
     """
     SSEによるリアルタイム通知ストリーム
-
-    エンドポイント: GET /api/stream/notifications
-
-    イベントデータ形式:
-    {
-        "task_id": 1,
-        "status": "PARSING",
-        "phase": "PDF解析中 (1/3)",
-        "error_message": null
-    }
-
-    使用例（JavaScript）:
-    ```javascript
-    const eventSource = new EventSource('/api/stream/notifications');
-    eventSource.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        console.log('Task update:', data);
-    };
-    ```
     """
     return EventSourceResponse(
         event_generator(request),
-        ping=15,  # 15秒ごとにpingを送信
-        ping_message_factory=lambda: {"event": "ping", "data": ""}
+        ping=15, # 自動Ping機能
+        media_type="text/event-stream"
     )
