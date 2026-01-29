@@ -47,6 +47,7 @@ clean:
 
 # ログの表示
 logs:
+	$(COMPOSE) logs > logs.txt 2>&1
 	$(COMPOSE) logs -f
 
 # 特定サービスのログ
