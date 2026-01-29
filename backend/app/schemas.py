@@ -166,6 +166,27 @@ class UploadResponse(BaseModel):
     task_id: int
 
 
+# ================== Paper List Response (フロントエンド用フラット形式) ==================
+
+class PaperListItem(BaseModel):
+    """
+    論文一覧用のフラットなレスポンス
+    最新バージョンのタスク情報を含む
+    """
+    paper_id: int
+    owner_id: Optional[int] = None
+    title: str
+    status: PaperStatusEnum
+    created_at: Optional[datetime] = None
+    # 最新タスクの情報
+    latest_task_id: Optional[int] = None
+    latest_task_status: Optional[TaskStatusEnum] = None
+    phase: Optional[str] = None  # フロントエンド表示用のフェーズ文字列
+
+    class Config:
+        from_attributes = True
+
+
 # ================== Auth Schemas ==================
 
 class TokenResponse(BaseModel):

@@ -340,8 +340,10 @@ def parse_task_data(data: bytes) -> tuple:
     """
     Parse task data from Redis.
     Returns: (task_type, task_data)
-    - For regular tasks: ("REGULAR", task_id as int)
+    - For regular tasks: ("REGULAR", {"task_id": int, "job_type": str})
+    - For reference tasks: ("REFERENCE_ONLY", {"task_id": int, "job_type": str})
     - For diagnosis tasks: ("SYSTEM_DIAGNOSIS", task_data as dict)
+    - Legacy format (task_id only): ("REGULAR", {"task_id": int, "job_type": "ANALYSIS"})
     """
     try:
         decoded = data.decode("utf-8")
@@ -349,13 +351,22 @@ def parse_task_data(data: bytes) -> tuple:
         # Try to parse as JSON first
         try:
             task_data = json.loads(decoded)
-            if isinstance(task_data, dict) and task_data.get("type") == "SYSTEM_DIAGNOSIS":
-                return ("SYSTEM_DIAGNOSIS", task_data)
+            if isinstance(task_data, dict):
+                # System diagnosis task
+                if task_data.get("type") == "SYSTEM_DIAGNOSIS":
+                    return ("SYSTEM_DIAGNOSIS", task_data)
+                # New format with job_type
+                if "task_id" in task_data:
+                    job_type = task_data.get("job_type", "ANALYSIS")
+                    if job_type == "REFERENCE_ONLY":
+                        return ("REFERENCE_ONLY", task_data)
+                    return ("REGULAR", task_data)
         except json.JSONDecodeError:
             pass
 
-        # If not JSON or not diagnosis, treat as regular task ID
-        return ("REGULAR", int(decoded))
+        # Legacy format: plain task_id number
+        task_id = int(decoded)
+        return ("REGULAR", {"task_id": task_id, "job_type": "ANALYSIS"})
 
     except Exception as e:
         print(f"Error parsing task data: {e}")
@@ -366,7 +377,7 @@ def main():
     """Main worker loop."""
     print("=" * 50)
     print(" NAK-BASE AI INFERENCE WORKER")
-    print(" Phase 1-1: New Schema Support")
+    print(" Phase 1.5: SSE + Reference Mode Support")
     print("=" * 50)
     print(f"Redis: {settings.redis_url}")
     print(f"Ollama: {settings.ollama_url}")
@@ -401,9 +412,16 @@ def main():
                     print(f"Received SYSTEM_DIAGNOSIS task")
                     process_diagnosis_task(task_data)
 
+                elif task_type == "REFERENCE_ONLY":
+                    task_id = task_data.get("task_id")
+                    print(f"Received REFERENCE_ONLY task: {task_id} (skipping analysis)")
+                    # 参考論文はすでにCOMPLETEDステータスなのでスキップ
+                    # 必要に応じてインデックス作成等の軽量処理を追加可能
+
                 elif task_type == "REGULAR":
-                    task_id = task_data
-                    print(f"Received regular task: {task_id}")
+                    task_id = task_data.get("task_id")
+                    job_type = task_data.get("job_type", "ANALYSIS")
+                    print(f"Received regular task: {task_id} (job_type: {job_type})")
                     process_task(task_id)
 
                 else:
