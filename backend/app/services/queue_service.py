@@ -30,24 +30,37 @@ def push_task(task_id: int) -> bool:
         return False
 
 
-def push_task_with_payload(task_id: int, job_type: str = "ANALYSIS") -> bool:
+def push_task_with_payload(
+    task_id: int,
+    job_type: str = "ANALYSIS",
+    conference_id: str | None = None,
+    parent_paper_id: int | None = None
+) -> bool:
     """
     タスクIDとジョブタイプをキューに追加
 
     Args:
         task_id: タスクID
         job_type: "ANALYSIS" (通常解析) または "REFERENCE_ONLY" (参考論文)
+        conference_id: 対象学会ID（Phase 1-3）
+        parent_paper_id: 前回論文ID（再提出の場合）
 
     Returns:
         bool: 成功/失敗
     """
     client = get_redis_client()
     try:
-        payload = json.dumps({
+        payload = {
             "task_id": task_id,
             "job_type": job_type
-        })
-        client.rpush(TASK_QUEUE, payload)
+        }
+        # Phase 1-3: コンテキスト情報を追加
+        if conference_id:
+            payload["conference_id"] = conference_id
+        if parent_paper_id:
+            payload["parent_paper_id"] = parent_paper_id
+
+        client.rpush(TASK_QUEUE, json.dumps(payload))
         return True
     except Exception as e:
         print(f"Error pushing task to queue: {e}")

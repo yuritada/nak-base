@@ -22,9 +22,20 @@ export type PaperStatusEnum =
 
 // ================== Core Types ==================
 
+export interface ConferenceRule {
+  rule_id: string;
+  name: string;
+  format_rules: Record<string, unknown> | null;
+  style_guide: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export interface Paper {
   paper_id: number;
   owner_id: number | null;
+  conference_id: string | null;
+  parent_paper_id: number | null;
   title: string;
   status: PaperStatusEnum;
   is_deleted: boolean;
@@ -82,6 +93,12 @@ export interface PaperWithVersions extends Paper {
 
 export interface PaperDetail extends Paper {
   versions: VersionWithFiles[];
+}
+
+export interface PaperListItem extends Paper {
+  latest_task_id: number | null;
+  latest_task_status: TaskStatusEnum | null;
+  phase: string | null;
 }
 
 // ================== API Response Types ==================

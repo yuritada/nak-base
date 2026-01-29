@@ -61,6 +61,8 @@ def list_papers(db: Session = Depends(get_db)):
         item = PaperListItem(
             paper_id=paper.paper_id,
             owner_id=paper.owner_id,
+            conference_id=paper.conference_id,
+            parent_paper_id=paper.parent_paper_id,
             title=paper.title,
             status=paper.status,
             created_at=paper.created_at,
@@ -98,6 +100,8 @@ async def upload_paper(
     title: str = Form(...),
     file: UploadFile = File(...),
     is_reference: Optional[bool] = Form(False),
+    conference_id: Optional[str] = Form(None),
+    parent_paper_id: Optional[int] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -105,19 +109,21 @@ async def upload_paper(
 
     Args:
         title: 論文タイトル
-        file: アップロードファイル（PDF, ZIP, TeX）
+        file: アップロードファイル（PDF, ZIP, TeX, DOCX）
         is_reference: 参考論文フラグ（True=解析スキップ）
+        conference_id: 対象学会のID（ConferenceRuleのrule_id）
+        parent_paper_id: 再提出の場合、前回の論文ID
 
     フロー:
     1. ファイルをローカルボリュームに保存
-    2. Paper レコード作成
-    3. Version レコード作成 (version_number=1)
+    2. Paper レコード作成（conference_id, parent_paper_id含む）
+    3. Version レコード作成 (version_number自動決定)
     4. File レコード作成
     5. InferenceTask レコード作成 (status=Pending)
-    6. Redisにタスクを投入（job_typeを含む）
+    6. Redisにタスクを投入（job_type, conference_id含む）
     """
     if settings.debug_mode:
-        print(f"【デバッグ】論文アップロード受信: タイトル='{title}', ファイル='{file.filename}', is_reference={is_reference}")
+        print(f"【デバッグ】論文アップロード受信: タイトル='{title}', ファイル='{file.filename}', is_reference={is_reference}, conference_id={conference_id}, parent_paper_id={parent_paper_id}")
 
     # PDF, ZIP, TeX, DOCXを受付
     lower_filename = file.filename.lower()
@@ -162,22 +168,46 @@ async def upload_paper(
     # 参考論文の場合は最初からCOMPLETEDステータス
     initial_status = PaperStatus.COMPLETED if is_reference else PaperStatus.PROCESSING
 
+    # conference_idの検証（指定されている場合）
+    if conference_id:
+        from ..models import ConferenceRule
+        conf = db.query(ConferenceRule).filter(ConferenceRule.rule_id == conference_id).first()
+        if not conf:
+            raise HTTPException(status_code=400, detail=f"Conference rule '{conference_id}' not found")
+
+    # parent_paper_idの検証（指定されている場合）
+    if parent_paper_id:
+        parent = db.query(Paper).filter(Paper.paper_id == parent_paper_id).first()
+        if not parent:
+            raise HTTPException(status_code=400, detail=f"Parent paper '{parent_paper_id}' not found")
+
     paper = Paper(
         owner_id=1,  # デモユーザー（Phase 2でOAuth実装時に変更）
         title=title,
-        status=initial_status
+        status=initial_status,
+        conference_id=conference_id,
+        parent_paper_id=parent_paper_id
     )
     db.add(paper)
     db.commit()
     db.refresh(paper)
 
     if settings.debug_mode:
-        print(f"【デバッグ】Paper作成: paper_id={paper.paper_id}")
+        print(f"【デバッグ】Paper作成: paper_id={paper.paper_id}, conference_id={conference_id}, parent_paper_id={parent_paper_id}")
 
     # 2. Version作成
+    # 再提出の場合は親論文のバージョン数+1
+    version_number = 1
+    if parent_paper_id:
+        max_version = db.query(Version).join(Paper).filter(
+            (Paper.paper_id == parent_paper_id) | (Paper.parent_paper_id == parent_paper_id)
+        ).order_by(desc(Version.version_number)).first()
+        if max_version:
+            version_number = max_version.version_number + 1
+
     version = Version(
         paper_id=paper.paper_id,
-        version_number=1
+        version_number=version_number
     )
     db.add(version)
     db.commit()
@@ -208,22 +238,29 @@ async def upload_paper(
 
     task = InferenceTask(
         version_id=version.version_id,
-        status=initial_task_status
+        status=initial_task_status,
+        conference_rule_id=conference_id  # 学会ルールを紐付け
     )
     db.add(task)
     db.commit()
     db.refresh(task)
 
     if settings.debug_mode:
-        print(f"【デバッグ】InferenceTask作成: task_id={task.task_id}, status={initial_task_status}")
+        print(f"【デバッグ】InferenceTask作成: task_id={task.task_id}, status={initial_task_status}, conference_rule_id={conference_id}")
 
     # 5. Redisにタスク追加（参考論文でない場合のみ）
     if not is_reference:
         job_type = "ANALYSIS"
-        push_task_with_payload(task.task_id, job_type)
+        # Phase 1-3: conference_id と parent_paper_id をペイロードに含める
+        push_task_with_payload(
+            task.task_id,
+            job_type,
+            conference_id=conference_id,
+            parent_paper_id=parent_paper_id
+        )
 
         if settings.debug_mode:
-            print(f"【デバッグ】RedisキューにTask ID={task.task_id}, job_type={job_type}を投入しました")
+            print(f"【デバッグ】RedisキューにTask ID={task.task_id}, job_type={job_type}, conference_id={conference_id}を投入しました")
     else:
         if settings.debug_mode:
             print(f"【デバッグ】参考論文のためキューへの投入をスキップしました")

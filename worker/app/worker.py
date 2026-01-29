@@ -1,18 +1,23 @@
 """
 nak-base AI Inference Worker
-Phase 1-1: 新スキーマ対応版
+Phase 1-3: RAG Pipeline + Context-Aware Prompt
 
 シングルプロセスで順次実行、リトライなし
+コンテキスト収集 → プロンプト組み立て → LLM呼び出し
 """
 import redis
 import time
 import json
 import requests
 from datetime import datetime
+from typing import Optional
 
 from .config import get_settings
 from .database import get_db_session
-from .models import InferenceTask, File, Feedback, Paper, Version, TaskStatus, PaperStatus
+from .models import (
+    InferenceTask, File, Feedback, Paper, Version,
+    TaskStatus, PaperStatus, ConferenceRule
+)
 
 settings = get_settings()
 
@@ -39,30 +44,185 @@ def publish_notification(task_id: int, status: str, phase: str | None = None, er
     except Exception as e:
         print(f"Failed to publish notification: {e}")
 
-# Ollamaプロンプト（固定）
-OLLAMA_PROMPT = """以下の論文のテキストを分析し、JSON形式で回答してください。
-
-## 分析内容
-1. 要約（summary）: 200文字程度で論文の概要を説明
-2. 誤字脱字（typos）: 検出された誤字脱字のリスト
-3. 改善提案（suggestions）: 論文を改善するための具体的な提案
-
-## 出力形式（JSON）
-{{
-  "summary": "論文の要約...",
-  "typos": ["誤字1", "誤字2"],
-  "suggestions": ["提案1", "提案2", "提案3"]
-}}
-
-## 論文テキスト
-{text}
-
-## 回答（JSON形式）"""
-
 
 def get_redis_client():
     return redis.from_url(settings.redis_url)
 
+
+# ================== Context Gathering (Phase 1-3) ==================
+
+def get_conference_context(db, conference_rule_id: Optional[str]) -> dict:
+    """
+    学会ルールのコンテキストを取得
+
+    Returns:
+        {
+            "name": "学会名",
+            "format_rules": {...},
+            "style_guide": "..."
+        }
+    """
+    if not conference_rule_id:
+        return {}
+
+    rule = db.query(ConferenceRule).filter(
+        ConferenceRule.rule_id == conference_rule_id
+    ).first()
+
+    if not rule:
+        return {}
+
+    return {
+        "name": rule.name,
+        "format_rules": rule.format_rules or {},
+        "style_guide": rule.style_guide or ""
+    }
+
+
+def get_previous_feedback_context(db, paper: Paper) -> dict:
+    """
+    前回提出のフィードバックを取得（再提出の場合）
+
+    Returns:
+        {
+            "parent_title": "前回の論文タイトル",
+            "summary": "前回のフィードバック要約",
+            "suggestions": ["改善提案1", ...],
+            "typos": ["誤字1", ...]
+        }
+    """
+    if not paper.parent_paper_id:
+        return {}
+
+    # 親論文を取得
+    parent_paper = db.query(Paper).filter(
+        Paper.paper_id == paper.parent_paper_id
+    ).first()
+
+    if not parent_paper:
+        return {}
+
+    # 親論文の最新バージョンのフィードバックを取得
+    parent_version = db.query(Version).filter(
+        Version.paper_id == parent_paper.paper_id
+    ).order_by(Version.version_number.desc()).first()
+
+    if not parent_version:
+        return {}
+
+    feedback = db.query(Feedback).filter(
+        Feedback.version_id == parent_version.version_id
+    ).first()
+
+    if not feedback:
+        return {}
+
+    return {
+        "parent_title": parent_paper.title,
+        "summary": feedback.overall_summary or "",
+        "suggestions": (feedback.comments_json or {}).get("suggestions", []),
+        "typos": (feedback.comments_json or {}).get("typos", [])
+    }
+
+
+# ================== Prompt Builder (Phase 1-3) ==================
+
+def build_analysis_prompt(
+    paper_text: str,
+    conference_context: dict,
+    previous_feedback: dict
+) -> str:
+    """
+    コンテキストを含む分析プロンプトを組み立て
+
+    Args:
+        paper_text: 解析済み論文テキスト
+        conference_context: 学会ルールコンテキスト
+        previous_feedback: 前回フィードバックコンテキスト
+
+    Returns:
+        組み立てられたプロンプト文字列
+    """
+    sections = []
+
+    # ヘッダー
+    sections.append("あなたは学術論文のレビューを行う専門家です。以下の論文を分析し、改善提案を行ってください。")
+    sections.append("")
+
+    # 学会ルールセクション（あれば）
+    if conference_context:
+        sections.append("=" * 50)
+        sections.append("## 対象学会・投稿規定")
+        sections.append(f"学会名: {conference_context.get('name', '不明')}")
+
+        format_rules = conference_context.get("format_rules", {})
+        if format_rules:
+            sections.append("")
+            sections.append("### フォーマット規定")
+            for key, value in format_rules.items():
+                sections.append(f"- {key}: {value}")
+
+        style_guide = conference_context.get("style_guide", "")
+        if style_guide:
+            sections.append("")
+            sections.append("### スタイルガイド")
+            sections.append(style_guide)
+
+        sections.append("")
+
+    # 前回フィードバックセクション（あれば）
+    if previous_feedback:
+        sections.append("=" * 50)
+        sections.append("## 前回提出時のフィードバック（参考情報）")
+        sections.append(f"前回タイトル: {previous_feedback.get('parent_title', '不明')}")
+
+        if previous_feedback.get("summary"):
+            sections.append("")
+            sections.append("### 前回の総評")
+            sections.append(previous_feedback["summary"])
+
+        if previous_feedback.get("suggestions"):
+            sections.append("")
+            sections.append("### 前回の改善提案（これらが反映されているか確認してください）")
+            for i, suggestion in enumerate(previous_feedback["suggestions"], 1):
+                sections.append(f"{i}. {suggestion}")
+
+        sections.append("")
+        sections.append("※ 上記の前回フィードバックを踏まえ、改善されている点と残っている課題を明確にしてください。")
+        sections.append("")
+
+    # 分析依頼
+    sections.append("=" * 50)
+    sections.append("## 分析内容")
+    sections.append("1. 要約（summary）: 200文字程度で論文の概要を説明")
+    sections.append("2. 誤字脱字（typos）: 検出された誤字脱字のリスト")
+    sections.append("3. 改善提案（suggestions）: 論文を改善するための具体的な提案")
+
+    if previous_feedback:
+        sections.append("4. 前回からの改善点（improvements_from_previous）: 前回フィードバックに対する改善状況")
+
+    sections.append("")
+    sections.append("## 出力形式（JSON）")
+    sections.append("{")
+    sections.append('  "summary": "論文の要約...",')
+    sections.append('  "typos": ["誤字1", "誤字2"],')
+    sections.append('  "suggestions": ["提案1", "提案2", "提案3"]')
+    if previous_feedback:
+        sections.append('  "improvements_from_previous": ["改善点1", "改善点2"]')
+    sections.append("}")
+    sections.append("")
+
+    # 論文テキスト
+    sections.append("=" * 50)
+    sections.append("## 論文テキスト")
+    sections.append(paper_text[:10000])  # 最初の10000文字のみ
+    sections.append("")
+    sections.append("## 回答（JSON形式）")
+
+    return "\n".join(sections)
+
+
+# ================== Parser & LLM Calls ==================
 
 def call_parser(file_path: str) -> dict:
     """
@@ -98,13 +258,33 @@ def call_parser(file_path: str) -> dict:
         raise ValueError("Parser response missing both 'content' and 'text' fields")
 
 
-def call_ollama(text: str) -> dict:
-    """Ollamaを呼び出してテキスト分析（Mock対応版）"""
+def call_ollama(prompt: str, is_mock_extended: bool = False) -> dict:
+    """
+    Ollamaを呼び出してテキスト分析
 
-    # Mockモードが有効な場合は即座にデモデータを返す
+    Args:
+        prompt: 組み立て済みプロンプト
+        is_mock_extended: 拡張MOCKモード（プロンプトを返す）
+
+    Returns:
+        分析結果のdict
+    """
+    # 拡張MOCKモード: プロンプト自体を返す（デバッグ用）
+    if settings.mock_mode and is_mock_extended:
+        print("Extended Mock mode: Returning assembled prompt...")
+        time.sleep(1)
+        return {
+            "summary": "[MOCK MODE] プロンプト確認モード",
+            "typos": [],
+            "suggestions": ["以下に組み立てられたプロンプトを表示しています。"],
+            "_debug_prompt": prompt,
+            "_debug_prompt_length": len(prompt)
+        }
+
+    # 通常MOCKモード: デモデータを返す
     if settings.mock_mode:
         print("Mock mode: Returning demo data...")
-        time.sleep(2)  # 処理してる感を出すための待ち時間
+        time.sleep(2)
         return {
             "summary": "本論文は、AIを活用した論文指導システムの構築について述べています。特に、マルチエージェントを用いたフィードバック層の導入により、教員の負担軽減と指導の質の向上を提案しています。",
             "typos": [
@@ -118,9 +298,7 @@ def call_ollama(text: str) -> dict:
             ]
         }
 
-    # 以下、元のOllama呼び出しロジック
-    prompt = OLLAMA_PROMPT.format(text=text[:10000])  # 最初の10000文字のみ
-
+    # 実際のOllama呼び出し
     response = requests.post(
         f"{settings.ollama_url}/api/generate",
         json={
@@ -135,9 +313,8 @@ def call_ollama(text: str) -> dict:
     result = response.json()
     response_text = result.get("response", "")
 
-    # JSONをパースしてみる
+    # JSONをパース
     try:
-        # JSONブロックを抽出
         if "```json" in response_text:
             json_str = response_text.split("```json")[1].split("```")[0]
         elif "```" in response_text:
@@ -151,13 +328,14 @@ def call_ollama(text: str) -> dict:
 
         return json.loads(json_str)
     except Exception:
-        # パースに失敗した場合はそのままテキストを返す
         return {
             "summary": response_text[:500],
             "typos": [],
             "suggestions": ["AIの応答をJSONとしてパースできませんでした"]
         }
 
+
+# ================== Task Processing ==================
 
 def process_diagnosis_task(task_data: dict):
     """
@@ -169,7 +347,6 @@ def process_diagnosis_task(task_data: dict):
     print("=" * 50)
 
     try:
-        # Dynamic import - only available in debug mode when tests are mounted
         import importlib.util
         spec = importlib.util.spec_from_file_location(
             "worker_check",
@@ -178,8 +355,6 @@ def process_diagnosis_task(task_data: dict):
         if spec and spec.loader:
             worker_check = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(worker_check)
-
-            # Run worker diagnosis
             result = worker_check.run_worker_diagnosis(task_data)
             print(f"Diagnosis completed: {result}")
             return result
@@ -200,20 +375,24 @@ def process_diagnosis_task(task_data: dict):
         return None
 
 
-def process_task(task_id: int):
+def process_task(task_id: int, task_data: Optional[dict] = None):
     """
-    タスクを処理（新スキーマ対応版）
+    タスクを処理（Phase 1-3: RAG Pipeline対応版）
 
     フロー:
     1. InferenceTask を取得
     2. Version 経由で File（cache_path）を取得
-    3. Parser でテキスト抽出
-    4. Ollama で分析
-    5. Feedback に結果を保存
-    6. Paper/InferenceTask のステータスを更新
+    3. コンテキスト収集（学会ルール、前回フィードバック）
+    4. Parser でテキスト抽出
+    5. プロンプト組み立て
+    6. Ollama で分析
+    7. Feedback に結果を保存
+    8. Paper/InferenceTask のステータスを更新
     """
     if settings.debug_mode:
         print(f"【デバッグ】タスク処理開始: Task ID={task_id}")
+        if task_data:
+            print(f"【デバッグ】タスクデータ: {task_data}")
 
     db = get_db_session()
 
@@ -233,6 +412,8 @@ def process_task(task_id: int):
             db.commit()
             return
 
+        paper = version.paper
+
         # プライマリファイルを取得
         primary_file = db.query(File).filter(
             File.version_id == version.version_id,
@@ -240,7 +421,6 @@ def process_task(task_id: int):
         ).first()
 
         if not primary_file:
-            # プライマリがなければ最初のファイルを使用
             primary_file = db.query(File).filter(
                 File.version_id == version.version_id
             ).first()
@@ -259,9 +439,23 @@ def process_task(task_id: int):
         task.status = TaskStatus.PARSING
         task.started_at = datetime.utcnow()
         db.commit()
-        publish_notification(task_id, "PARSING", "PDF解析中 (1/3)")
+        publish_notification(task_id, "PARSING", "PDF解析中 (1/4)")
 
-        # 3. Parserを呼び出してテキスト抽出
+        # 3. コンテキスト収集（Phase 1-3）
+        if settings.debug_mode:
+            print(f"【デバッグ】コンテキスト収集開始...")
+
+        # 学会ルールコンテキスト
+        conference_context = get_conference_context(db, task.conference_rule_id)
+        if settings.debug_mode and conference_context:
+            print(f"【デバッグ】学会ルール取得: {conference_context.get('name', 'N/A')}")
+
+        # 前回フィードバックコンテキスト
+        previous_feedback = get_previous_feedback_context(db, paper) if paper else {}
+        if settings.debug_mode and previous_feedback:
+            print(f"【デバッグ】前回フィードバック取得: {previous_feedback.get('parent_title', 'N/A')}")
+
+        # 4. Parserを呼び出してテキスト抽出
         if settings.debug_mode:
             print(f"【デバッグ】Parserコンテナへテキスト抽出を依頼中... (Path: {file_path})")
         print("Calling Parser service...")
@@ -274,48 +468,86 @@ def process_task(task_id: int):
                 print(f"【デバッグ】ファイル種別: {parse_meta.get('file_type', 'unknown')}, ページ数: {parse_meta.get('num_pages', 0)}")
         print(f"Parsed text length: {len(parsed_text)}")
 
+        # ステータス更新: RAG (コンテキスト処理中)
+        task.status = TaskStatus.RAG
+        db.commit()
+        publish_notification(task_id, "RAG", "コンテキスト処理中 (2/4)")
+
+        # 5. プロンプト組み立て（Phase 1-3）
+        if settings.debug_mode:
+            print(f"【デバッグ】プロンプト組み立て中...")
+
+        prompt = build_analysis_prompt(
+            paper_text=parsed_text,
+            conference_context=conference_context,
+            previous_feedback=previous_feedback
+        )
+
+        if settings.debug_mode:
+            print(f"【デバッグ】プロンプト長: {len(prompt)}文字")
+
         # ステータス更新: LLM
         task.status = TaskStatus.LLM
         db.commit()
-        publish_notification(task_id, "LLM", "AI分析中 (2/3)")
+        publish_notification(task_id, "LLM", "AI分析中 (3/4)")
 
-        # 4. Ollamaを呼び出して分析
+        # 6. Ollamaを呼び出して分析
         if settings.debug_mode:
             print(f"【デバッグ】AI推論(Ollama)を開始します...")
         print("Calling Ollama for analysis...")
-        result = call_ollama(parsed_text)
+
+        # 拡張MOCKモード判定（デバッグモード + タスクデータにdebug_promptフラグ）
+        is_mock_extended = (
+            settings.mock_mode and
+            settings.debug_mode and
+            task_data and
+            task_data.get("debug_prompt", False)
+        )
+
+        result = call_ollama(prompt, is_mock_extended=is_mock_extended)
         if settings.debug_mode:
             print(f"【デバッグ】AI推論完了。結果をDBに書き込みます。")
         print("Ollama analysis complete")
 
-        # 5. Feedback に結果を保存
+        # 7. Feedback に結果を保存
+        comments = {
+            "typos": result.get("typos", []),
+            "suggestions": result.get("suggestions", [])
+        }
+
+        # 前回からの改善点があれば追加
+        if "improvements_from_previous" in result:
+            comments["improvements_from_previous"] = result["improvements_from_previous"]
+
+        # 拡張MOCKモードの場合、プロンプトデバッグ情報を追加
+        if "_debug_prompt" in result:
+            comments["_debug_prompt"] = result["_debug_prompt"]
+            comments["_debug_prompt_length"] = result["_debug_prompt_length"]
+
         feedback = Feedback(
             version_id=version.version_id,
             task_id=task.task_id,
             score_json=None,  # 将来的にスコア計算を実装
-            comments_json={"typos": result.get("typos", []), "suggestions": result.get("suggestions", [])},
+            comments_json=comments,
             overall_summary=result.get("summary", "")
         )
         db.add(feedback)
 
-        # 6. ステータス更新: COMPLETED
+        # 8. ステータス更新: COMPLETED
         task.status = TaskStatus.COMPLETED
         task.completed_at = datetime.utcnow()
 
-        # Paper のステータスも更新
-        paper = version.paper
         if paper:
             paper.status = PaperStatus.COMPLETED
 
         db.commit()
-        publish_notification(task_id, "COMPLETED", "分析完了")
+        publish_notification(task_id, "COMPLETED", "分析完了 (4/4)")
         print(f"Task {task_id} completed successfully")
 
     except Exception as e:
         print(f"Error processing task {task_id}: {e}")
         db.rollback()
 
-        # エラー時は即 status = ERROR
         try:
             task = db.query(InferenceTask).filter(InferenceTask.task_id == task_id).first()
             if task:
@@ -323,7 +555,6 @@ def process_task(task_id: int):
                 task.error_message = str(e)
                 task.completed_at = datetime.utcnow()
 
-                # Paper のステータスも ERROR に
                 if task.version and task.version.paper:
                     task.version.paper.status = PaperStatus.ERROR
 
@@ -340,7 +571,7 @@ def parse_task_data(data: bytes) -> tuple:
     """
     Parse task data from Redis.
     Returns: (task_type, task_data)
-    - For regular tasks: ("REGULAR", {"task_id": int, "job_type": str})
+    - For regular tasks: ("REGULAR", {"task_id": int, "job_type": str, ...})
     - For reference tasks: ("REFERENCE_ONLY", {"task_id": int, "job_type": str})
     - For diagnosis tasks: ("SYSTEM_DIAGNOSIS", task_data as dict)
     - Legacy format (task_id only): ("REGULAR", {"task_id": int, "job_type": "ANALYSIS"})
@@ -348,14 +579,11 @@ def parse_task_data(data: bytes) -> tuple:
     try:
         decoded = data.decode("utf-8")
 
-        # Try to parse as JSON first
         try:
             task_data = json.loads(decoded)
             if isinstance(task_data, dict):
-                # System diagnosis task
                 if task_data.get("type") == "SYSTEM_DIAGNOSIS":
                     return ("SYSTEM_DIAGNOSIS", task_data)
-                # New format with job_type
                 if "task_id" in task_data:
                     job_type = task_data.get("job_type", "ANALYSIS")
                     if job_type == "REFERENCE_ONLY":
@@ -364,7 +592,6 @@ def parse_task_data(data: bytes) -> tuple:
         except json.JSONDecodeError:
             pass
 
-        # Legacy format: plain task_id number
         task_id = int(decoded)
         return ("REGULAR", {"task_id": task_id, "job_type": "ANALYSIS"})
 
@@ -377,7 +604,7 @@ def main():
     """Main worker loop."""
     print("=" * 50)
     print(" NAK-BASE AI INFERENCE WORKER")
-    print(" Phase 1.5: SSE + Reference Mode Support")
+    print(" Phase 1-3: RAG Pipeline + Context-Aware Prompt")
     print("=" * 50)
     print(f"Redis: {settings.redis_url}")
     print(f"Ollama: {settings.ollama_url}")
@@ -387,7 +614,6 @@ def main():
 
     client = get_redis_client()
 
-    # Wait for Redis to be ready
     while True:
         try:
             client.ping()
@@ -401,7 +627,6 @@ def main():
 
     while True:
         try:
-            # Blocking pop from queue (timeout=30s)
             result = client.blpop(TASK_QUEUE, timeout=30)
 
             if result:
@@ -415,19 +640,17 @@ def main():
                 elif task_type == "REFERENCE_ONLY":
                     task_id = task_data.get("task_id")
                     print(f"Received REFERENCE_ONLY task: {task_id} (skipping analysis)")
-                    # 参考論文はすでにCOMPLETEDステータスなのでスキップ
-                    # 必要に応じてインデックス作成等の軽量処理を追加可能
 
                 elif task_type == "REGULAR":
                     task_id = task_data.get("task_id")
                     job_type = task_data.get("job_type", "ANALYSIS")
-                    print(f"Received regular task: {task_id} (job_type: {job_type})")
-                    process_task(task_id)
+                    conference_id = task_data.get("conference_id")
+                    parent_paper_id = task_data.get("parent_paper_id")
+                    print(f"Received regular task: {task_id} (job_type: {job_type}, conference: {conference_id}, parent: {parent_paper_id})")
+                    process_task(task_id, task_data)
 
                 else:
                     print(f"Unknown task type, skipping: {data}")
-
-            # タイムアウト時は何もせずループ継続
 
         except Exception as e:
             print(f"Worker error: {e}")

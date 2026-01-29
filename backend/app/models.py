@@ -77,11 +77,17 @@ class Paper(Base):
     2. papers (論文基本情報)
     論文の箱となるメタデータ
     主キーは paper_id で統一
+
+    Phase 1-3: conference_id, parent_paper_id 追加
+    - conference_id: どの学会向けの論文か
+    - parent_paper_id: 再提出の場合、前回の論文ID（バージョニング）
     """
     __tablename__ = "papers"
 
     paper_id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    conference_id = Column(String(50), ForeignKey("conference_rules.rule_id", ondelete="SET NULL"), nullable=True)
+    parent_paper_id = Column(Integer, ForeignKey("papers.paper_id", ondelete="SET NULL"), nullable=True)
     title = Column(String(500), nullable=False)
     status = Column(SQLEnum(PaperStatus), nullable=False, default=PaperStatus.PROCESSING)
     is_deleted = Column(Boolean, nullable=False, default=False)
@@ -90,6 +96,8 @@ class Paper(Base):
 
     # Relationships
     owner = relationship("User", back_populates="owned_papers")
+    conference = relationship("ConferenceRule", back_populates="papers")
+    parent_paper = relationship("Paper", remote_side="Paper.paper_id", backref="child_papers")
     authors = relationship("PaperAuthor", back_populates="paper", cascade="all, delete-orphan")
     versions = relationship("Version", back_populates="paper", cascade="all, delete-orphan")
 
@@ -238,6 +246,10 @@ class Embedding(Base):
 class ConferenceRule(Base):
     """
     9. conference_rules (学会別ルール定義)
+
+    Phase 1-3: プロンプトに埋め込む学会ルール
+    - format_rules: JSON形式のフォーマット規定（ページ数、フォントサイズ等）
+    - style_guide: テキスト形式のスタイルガイド（プロンプトに直接埋め込み）
     """
     __tablename__ = "conference_rules"
 
@@ -250,6 +262,7 @@ class ConferenceRule(Base):
 
     # Relationships
     inference_tasks = relationship("InferenceTask", back_populates="conference_rule")
+    papers = relationship("Paper", back_populates="conference")
 
 
 class VersionDiff(Base):

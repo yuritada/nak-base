@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Upload, FileText, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
-import { uploadPaper, getTask } from '@/lib/api';
-import type { TaskStatusEnum } from '@/types';
+import { uploadPaper, getTask, getConferences, getPapers } from '@/lib/api';
+import type { TaskStatusEnum, ConferenceRule, PaperListItem } from '@/types';
 import { getTaskStatusDisplay } from '@/types';
 
 type UploadStatus = 'idle' | 'uploading' | 'processing' | 'completed' | 'error';
@@ -16,10 +16,36 @@ export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [isReference, setIsReference] = useState(false);
+  const [conferenceId, setConferenceId] = useState<string>('');
+  const [parentPaperId, setParentPaperId] = useState<number | null>(null);
+  const [isResubmission, setIsResubmission] = useState(false);
+
+  const [conferences, setConferences] = useState<ConferenceRule[]>([]);
+  const [existingPapers, setExistingPapers] = useState<PaperListItem[]>([]);
+  const [loadingData, setLoadingData] = useState(true);
+
   const [status, setStatus] = useState<UploadStatus>('idle');
   const [error, setError] = useState<string | null>(null);
   const [taskStatus, setTaskStatus] = useState<TaskStatusEnum>('PENDING');
   const [taskPhase, setTaskPhase] = useState<string | null>(null);
+
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const [confs, papers] = await Promise.all([
+          getConferences(),
+          getPapers(),
+        ]);
+        setConferences(confs);
+        setExistingPapers(papers.filter(p => p.status === 'COMPLETED'));
+      } catch (err) {
+        console.error('Failed to load data:', err);
+      } finally {
+        setLoadingData(false);
+      }
+    };
+    loadData();
+  }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -28,6 +54,14 @@ export default function UploadPage() {
       if (!title) {
         setTitle(f.name.replace(/\.(pdf|zip|tex|docx)$/i, ''));
       }
+    }
+  };
+
+  const handleResubmissionChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const checked = e.target.checked;
+    setIsResubmission(checked);
+    if (!checked) {
+      setParentPaperId(null);
     }
   };
 
@@ -43,6 +77,8 @@ export default function UploadPage() {
         title,
         file,
         isReference,
+        conferenceId: conferenceId || undefined,
+        parentPaperId: parentPaperId || undefined,
       });
 
       if (isReference) {
@@ -58,11 +94,11 @@ export default function UploadPage() {
           setTaskStatus(task.status);
 
           if (task.status === 'PARSING') {
-            setTaskPhase('PDF解析中 (1/3)');
+            setTaskPhase('PDF解析中 (1/4)');
           } else if (task.status === 'RAG') {
-            setTaskPhase('RAG処理中 (2/3)');
+            setTaskPhase('コンテキスト処理中 (2/4)');
           } else if (task.status === 'LLM') {
-            setTaskPhase('AI分析中 (3/3)');
+            setTaskPhase('AI分析中 (3/4)');
           }
 
           if (task.status === 'COMPLETED') {
@@ -71,7 +107,7 @@ export default function UploadPage() {
           } else if (task.status === 'ERROR') {
             clearInterval(pollInterval);
             setStatus('error');
-            setError(task.error_message || 'エラーが発生しました');
+            setError(task.error_message || 'Error occurred');
           }
         } catch (err) {
           console.error('Poll error:', err);
@@ -79,7 +115,7 @@ export default function UploadPage() {
       }, 3000);
     } catch (err) {
       setStatus('error');
-      setError(err instanceof Error ? err.message : 'アップロードに失敗しました');
+      setError(err instanceof Error ? err.message : 'Upload failed');
     }
   };
 
@@ -89,7 +125,7 @@ export default function UploadPage() {
         return (
           <div className="flex items-center text-blue-600">
             <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-            アップロード中...
+            Uploading...
           </div>
         );
       case 'processing': {
@@ -105,14 +141,14 @@ export default function UploadPage() {
         return (
           <div className="flex items-center text-green-600">
             <CheckCircle className="w-5 h-5 mr-2" />
-            {isReference ? '登録完了！' : '分析完了！'}
+            {isReference ? 'Registration complete!' : 'Analysis complete!'}
           </div>
         );
       case 'error':
         return (
           <div className="flex items-center text-red-600">
             <AlertCircle className="w-5 h-5 mr-2" />
-            エラー: {error}
+            Error: {error}
           </div>
         );
       default:
@@ -125,11 +161,11 @@ export default function UploadPage() {
       case 'PENDING':
         return '10%';
       case 'PARSING':
-        return '33%';
+        return '25%';
       case 'RAG':
-        return '66%';
+        return '50%';
       case 'LLM':
-        return '90%';
+        return '75%';
       case 'COMPLETED':
         return '100%';
       default:
@@ -187,13 +223,83 @@ export default function UploadPage() {
           </button>
         </div>
 
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            対象学会（任意）
+          </label>
+          <select
+            value={conferenceId}
+            onChange={(e) => setConferenceId(e.target.value)}
+            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            disabled={loadingData}
+          >
+            <option value="">選択しない</option>
+            {conferences.map((conf) => (
+              <option key={conf.rule_id} value={conf.rule_id}>
+                {conf.name}
+              </option>
+            ))}
+          </select>
+          <p className="text-sm text-gray-500 mt-1">
+            学会を選択すると、投稿規定に基づいたフィードバックが得られます
+          </p>
+        </div>
+
+        <div className="flex items-start">
+          <div className="flex items-center h-5">
+            <input
+              id="isResubmission"
+              type="checkbox"
+              checked={isResubmission}
+              onChange={handleResubmissionChange}
+              className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+              disabled={isReference}
+            />
+          </div>
+          <div className="ml-3">
+            <label htmlFor="isResubmission" className="text-sm font-medium text-gray-700">
+              再提出（前回論文の改訂版）
+            </label>
+            <p className="text-sm text-gray-500">
+              前回のフィードバックを踏まえた分析を行います
+            </p>
+          </div>
+        </div>
+
+        {isResubmission && (
+          <div className="ml-7">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              前回の論文を選択
+            </label>
+            <select
+              value={parentPaperId || ''}
+              onChange={(e) => setParentPaperId(e.target.value ? Number(e.target.value) : null)}
+              className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              required={isResubmission}
+            >
+              <option value="">選択してください</option>
+              {existingPapers.map((paper) => (
+                <option key={paper.paper_id} value={paper.paper_id}>
+                  {paper.title}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         <div className="flex items-start">
           <div className="flex items-center h-5">
             <input
               id="isReference"
               type="checkbox"
               checked={isReference}
-              onChange={(e) => setIsReference(e.target.checked)}
+              onChange={(e) => {
+                setIsReference(e.target.checked);
+                if (e.target.checked) {
+                  setIsResubmission(false);
+                  setParentPaperId(null);
+                }
+              }}
               className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
             />
           </div>
@@ -229,7 +335,7 @@ export default function UploadPage() {
 
         <button
           type="submit"
-          disabled={!file || !title || status === 'uploading' || status === 'processing'}
+          disabled={!file || !title || status === 'uploading' || status === 'processing' || (isResubmission && !parentPaperId)}
           className="w-full py-3 px-4 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
         >
           {isReference ? '参考論文として登録' : 'アップロードして分析開始'}

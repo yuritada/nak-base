@@ -6,10 +6,12 @@
 import type {
   Paper,
   PaperDetail,
+  PaperListItem,
   InferenceTask,
   UploadResponse,
   Version,
   Feedback,
+  ConferenceRule,
 } from '@/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -33,9 +35,21 @@ export async function demoLogin(): Promise<{ access_token: string }> {
   return handleResponse(res);
 }
 
+// ================== Conferences API ==================
+
+export async function getConferences(): Promise<ConferenceRule[]> {
+  const res = await fetch(`${API_URL}/conferences/`);
+  return handleResponse(res);
+}
+
+export async function getConference(ruleId: string): Promise<ConferenceRule> {
+  const res = await fetch(`${API_URL}/conferences/${ruleId}`);
+  return handleResponse(res);
+}
+
 // ================== Papers API ==================
 
-export async function getPapers(): Promise<Paper[]> {
+export async function getPapers(): Promise<PaperListItem[]> {
   const res = await fetch(`${API_URL}/papers/`);
   return handleResponse(res);
 }
@@ -65,10 +79,12 @@ export interface UploadOptions {
   title: string;
   file: File;
   isReference?: boolean;
+  conferenceId?: string;
+  parentPaperId?: number;
 }
 
 export async function uploadPaper(options: UploadOptions): Promise<UploadResponse> {
-  const { title, file, isReference = false } = options;
+  const { title, file, isReference = false, conferenceId, parentPaperId } = options;
 
   const formData = new FormData();
   formData.append('title', title);
@@ -76,6 +92,14 @@ export async function uploadPaper(options: UploadOptions): Promise<UploadRespons
 
   if (isReference) {
     formData.append('is_reference', 'true');
+  }
+
+  if (conferenceId) {
+    formData.append('conference_id', conferenceId);
+  }
+
+  if (parentPaperId) {
+    formData.append('parent_paper_id', String(parentPaperId));
   }
 
   const res = await fetch(`${API_URL}/papers/upload`, {
@@ -106,4 +130,4 @@ export async function getFeedback(versionId: number): Promise<Feedback | null> {
 
 // ================== Type Re-exports ==================
 
-export type { Paper, PaperDetail, InferenceTask, UploadResponse, Version, Feedback };
+export type { Paper, PaperDetail, PaperListItem, InferenceTask, UploadResponse, Version, Feedback, ConferenceRule };

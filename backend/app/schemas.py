@@ -67,15 +67,50 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
+# ================== ConferenceRule Schemas ==================
+
+class ConferenceRuleBase(BaseModel):
+    """学会ルールの基本スキーマ"""
+    name: str
+    format_rules: Optional[dict] = None
+    style_guide: Optional[str] = None
+
+
+class ConferenceRuleCreate(ConferenceRuleBase):
+    """学会ルール作成用スキーマ"""
+    rule_id: str
+
+
+class ConferenceRuleUpdate(BaseModel):
+    """学会ルール更新用スキーマ（部分更新対応）"""
+    name: Optional[str] = None
+    format_rules: Optional[dict] = None
+    style_guide: Optional[str] = None
+
+
+class ConferenceRuleResponse(ConferenceRuleBase):
+    """学会ルールレスポンススキーマ"""
+    rule_id: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 # ================== Paper Schemas ==================
 
 class PaperCreate(BaseModel):
     title: str
+    conference_id: Optional[str] = None
+    parent_paper_id: Optional[int] = None
 
 
 class PaperResponse(BaseModel):
     paper_id: int
     owner_id: Optional[int] = None
+    conference_id: Optional[str] = None
+    parent_paper_id: Optional[int] = None
     title: str
     status: PaperStatusEnum
     is_deleted: bool
@@ -176,6 +211,8 @@ class PaperListItem(BaseModel):
     """
     paper_id: int
     owner_id: Optional[int] = None
+    conference_id: Optional[str] = None
+    parent_paper_id: Optional[int] = None
     title: str
     status: PaperStatusEnum
     created_at: Optional[datetime] = None

@@ -26,6 +26,7 @@ class UserRole(str, enum.Enum):
 
 class FileRole(str, enum.Enum):
     MAIN_PDF = "MAIN_PDF"
+    MAIN_DOCX = "MAIN_DOCX"
     SOURCE_TEX = "SOURCE_TEX"
     ADDITIONAL_FILE = "ADDITIONAL_FILE"
 
@@ -73,11 +74,15 @@ class Paper(Base):
     """
     2. papers (論文基本情報)
     主キーは paper_id で統一（Backend側と一致）
+
+    Phase 1-3: conference_id, parent_paper_id 追加
     """
     __tablename__ = "papers"
 
     paper_id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    conference_id = Column(String(50), ForeignKey("conference_rules.rule_id", ondelete="SET NULL"), nullable=True)
+    parent_paper_id = Column(Integer, ForeignKey("papers.paper_id", ondelete="SET NULL"), nullable=True)
     title = Column(String(500), nullable=False)
     status = Column(SQLEnum(PaperStatus), nullable=False, default=PaperStatus.PROCESSING)
     is_deleted = Column(Boolean, nullable=False, default=False)
@@ -86,6 +91,8 @@ class Paper(Base):
 
     # Relationships
     owner = relationship("User", back_populates="owned_papers")
+    conference = relationship("ConferenceRule", back_populates="papers")
+    parent_paper = relationship("Paper", remote_side="Paper.paper_id", backref="child_papers")
     authors = relationship("PaperAuthor", back_populates="paper", cascade="all, delete-orphan")
     versions = relationship("Version", back_populates="paper", cascade="all, delete-orphan")
 
@@ -231,6 +238,8 @@ class Embedding(Base):
 class ConferenceRule(Base):
     """
     9. conference_rules (学会別ルール定義)
+
+    Phase 1-3: プロンプトに埋め込む学会ルール
     """
     __tablename__ = "conference_rules"
 
@@ -243,6 +252,7 @@ class ConferenceRule(Base):
 
     # Relationships
     inference_tasks = relationship("InferenceTask", back_populates="conference_rule")
+    papers = relationship("Paper", back_populates="conference")
 
 
 class VersionDiff(Base):
