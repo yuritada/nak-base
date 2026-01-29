@@ -15,7 +15,7 @@ import tempfile
 import zipfile
 
 # Configuration
-PARSER_URL = os.getenv("PARSER_URL", "http://parser:8000")
+PARSER_URL = os.getenv("PARSER_URL", "http://parser:8001")
 STORAGE_PATH = os.getenv("STORAGE_PATH", "/app/storage")
 
 
