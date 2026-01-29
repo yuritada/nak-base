@@ -1,2 +1,2 @@
-# MVP版 ルーター
-from . import auth, papers
+# Phase 1.5 ルーター
+from . import auth, papers, notifications

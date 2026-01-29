@@ -17,6 +17,27 @@ from .models import InferenceTask, File, Feedback, Paper, Version, TaskStatus, P
 settings = get_settings()
 
 TASK_QUEUE = "tasks"
+NOTIFICATION_CHANNEL = "task_notifications"
+
+
+def publish_notification(task_id: int, status: str, phase: str | None = None, error_message: str | None = None):
+    """
+    タスク通知をRedis Pub/Subに発行
+    フロントエンドのSSEに中継される
+    """
+    try:
+        client = get_redis_client()
+        notification = {
+            "task_id": task_id,
+            "status": status,
+            "phase": phase,
+            "error_message": error_message,
+        }
+        client.publish(NOTIFICATION_CHANNEL, json.dumps(notification))
+        if settings.debug_mode:
+            print(f"【デバッグ】通知発行: {notification}")
+    except Exception as e:
+        print(f"Failed to publish notification: {e}")
 
 # Ollamaプロンプト（固定）
 OLLAMA_PROMPT = """以下の論文のテキストを分析し、JSON形式で回答してください。
@@ -238,6 +259,7 @@ def process_task(task_id: int):
         task.status = TaskStatus.PARSING
         task.started_at = datetime.utcnow()
         db.commit()
+        publish_notification(task_id, "PARSING", "PDF解析中 (1/3)")
 
         # 3. Parserを呼び出してテキスト抽出
         if settings.debug_mode:
@@ -255,6 +277,7 @@ def process_task(task_id: int):
         # ステータス更新: LLM
         task.status = TaskStatus.LLM
         db.commit()
+        publish_notification(task_id, "LLM", "AI分析中 (2/3)")
 
         # 4. Ollamaを呼び出して分析
         if settings.debug_mode:
@@ -285,6 +308,7 @@ def process_task(task_id: int):
             paper.status = PaperStatus.COMPLETED
 
         db.commit()
+        publish_notification(task_id, "COMPLETED", "分析完了")
         print(f"Task {task_id} completed successfully")
 
     except Exception as e:
@@ -304,6 +328,7 @@ def process_task(task_id: int):
                     task.version.paper.status = PaperStatus.ERROR
 
                 db.commit()
+                publish_notification(task_id, "ERROR", error_message=str(e))
         except Exception as inner_e:
             print(f"Failed to update error status: {inner_e}")
 

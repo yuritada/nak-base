@@ -9,10 +9,10 @@ import os
 import uuid
 
 from ..database import get_db
-from ..models import Paper, Version, File as FileModel, InferenceTask, PaperStatus, TaskStatus, FileRole
+from ..models import Paper, Version, File as FileModel, InferenceTask, Feedback, PaperStatus, TaskStatus, FileRole
 from ..schemas import (
     PaperResponse, PaperWithVersions, PaperDetail,
-    VersionResponse, InferenceTaskResponse, UploadResponse
+    VersionResponse, InferenceTaskResponse, UploadResponse, FeedbackResponse
 )
 from ..services.queue_service import push_task
 from ..config import get_settings
@@ -191,3 +191,12 @@ def delete_paper(paper_id: int, db: Session = Depends(get_db)):
     db.commit()
 
     return {"message": "Paper deleted successfully", "paper_id": paper_id}
+
+
+@router.get("/versions/{version_id}/feedback", response_model=FeedbackResponse)
+def get_feedback(version_id: int, db: Session = Depends(get_db)):
+    """特定バージョンのフィードバックを取得"""
+    feedback = db.query(Feedback).filter(Feedback.version_id == version_id).first()
+    if not feedback:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+    return feedback
