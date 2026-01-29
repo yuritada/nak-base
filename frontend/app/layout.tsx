@@ -32,6 +32,9 @@ export default function RootLayout({
                 <a href="/upload" className="text-gray-600 hover:text-gray-900">
                   アップロード
                 </a>
+                <a href="/conferences" className="text-gray-600 hover:text-gray-900">
+                  学会設定
+                </a>
               </div>
             </div>
           </div>

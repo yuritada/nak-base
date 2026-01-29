@@ -47,6 +47,47 @@ export async function getConference(ruleId: string): Promise<ConferenceRule> {
   return handleResponse(res);
 }
 
+export interface ConferenceRuleCreate {
+  rule_id: string;
+  name: string;
+  format_rules?: Record<string, unknown>;
+  style_guide?: string;
+}
+
+export interface ConferenceRuleUpdate {
+  name?: string;
+  format_rules?: Record<string, unknown>;
+  style_guide?: string;
+}
+
+export async function createConference(data: ConferenceRuleCreate): Promise<ConferenceRule> {
+  const res = await fetch(`${API_URL}/conferences/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  return handleResponse(res);
+}
+
+export async function updateConference(ruleId: string, data: ConferenceRuleUpdate): Promise<ConferenceRule> {
+  const res = await fetch(`${API_URL}/conferences/${ruleId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  return handleResponse(res);
+}
+
+export async function deleteConference(ruleId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/conferences/${ruleId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(errorText || `HTTP ${res.status}`);
+  }
+}
+
 // ================== Papers API ==================
 
 export async function getPapers(): Promise<PaperListItem[]> {
