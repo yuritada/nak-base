@@ -1,0 +1,16 @@
+# Debug mode overlay for nak-base
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.debug.yml up -d
+#
+# This file mounts test scripts only in debug mode.
+# Production builds (docker-compose.yml only) will NOT include test code.
+
+services:
+  backend:
+    volumes:
+      - ./tests:/app/tests:ro
+      - ./logs:/app/logs
+
+  worker:
+    volumes:
+      - ./tests:/app/tests:ro
+      - ./logs:/app/logs

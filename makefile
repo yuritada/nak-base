@@ -1,7 +1,7 @@
 # nak-base MVP
 COMPOSE = docker-compose
 
-.PHONY: help up build down restart clean logs ps setup-ollama
+.PHONY: help up build down restart clean logs ps setup-ollama debug-up debug-down test
 
 # デフォルトのターゲット
 help:
@@ -16,15 +16,21 @@ help:
 	@echo "  make ps           - コンテナ状態を表示"
 	@echo "  make setup-ollama - Ollamaモデルをダウンロード（初回のみ）"
 	@echo ""
+	@echo "デバッグ用コマンド:"
+	@echo "  make debug-up     - デバッグモードで起動（テストコード含む）"
+	@echo "  make debug-down   - デバッグモードを停止"
+	@echo "  make test         - システム診断を実行"
+	@echo ""
 	@echo "初回セットアップ手順:"
 	@echo "  1. make build"
 	@echo "  2. make up"
 	@echo "  3. make setup-ollama"
 	@echo "  4. http://localhost:3000 にアクセス"
 
-# コンテナの起動
+# コンテナの起動（本番モード）
 up:
 	$(COMPOSE) up -d
+	$(COMPOSE) logs -f --tail="all" > logs.txt 2>&1 &
 
 # イメージのビルド
 build:
@@ -33,22 +39,36 @@ build:
 # コンテナの停止
 down:
 	$(COMPOSE) down
+	-pkill -f "$(COMPOSE) logs"
 
 # 再起動
 restart:
 	$(COMPOSE) down
 	$(COMPOSE) up -d
 
+# 強力なクリーンアップ（DB、ボリューム、イメージ、キャッシュ、ログを全て吹き飛ばす）
+# デバッグ用を含めた全構成ファイルを定義
+COMPOSE_FILES = -f docker-compose.yml -f docker-compose.debug.yml
+
 # 強力なクリーンアップ
 clean:
-	$(COMPOSE) down --volumes --rmi all --remove-orphans
+	@echo "システム全体の完全リセットを開始します..."
+	# 1. 両方の設定ファイルを明示的に指定して、ボリュームごと削除
+	docker-compose $(COMPOSE_FILES) down --volumes --rmi all --remove-orphans
+	# 2. 名前のないボリュームや、迷子になったボリュームを強制削除
+	docker volume prune -f
+	# 3. キャッシュとログの削除
 	docker builder prune -f
+	find . -name "__pycache__" -type d -exec rm -rf {} +
+	find . -name "*.pyc" -delete
+	rm -rf logs/
+	rm -f logs.txt
 	@echo "完全クリーンアップ完了"
+	
 
 # ログの表示
 logs:
-	$(COMPOSE) logs > logs.txt 2>&1
-	$(COMPOSE) logs -f
+	$(COMPOSE) logs -f --tail="all"
 
 # 特定サービスのログ
 logs-backend:
@@ -70,3 +90,53 @@ setup-ollama:
 	@echo "これには数分かかる場合があります..."
 	docker exec nak_base_ollama ollama pull gemma2:2b
 	@echo "モデルのダウンロード完了！"
+
+# ===========================================
+# Debug Mode Commands
+# ===========================================
+
+# デバッグモードで起動（テストコードをマウント）
+debug-up:
+	@echo "デバッグモードで起動中..."
+	@mkdir -p logs
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.debug.yml up -d
+	$(COMPOSE) logs -f --tail="all" > logs.txt 2>&1 &
+	@echo ""
+	@echo "デバッグモードで起動しました。"
+	@echo "テストを実行するには: make test"
+
+# デバッグモードを停止
+debug-down:
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.debug.yml down
+	-pkill -f "$(COMPOSE) logs"
+
+# システム診断を実行（デバッグモード専用）
+# test:
+# 	@echo "=============================================="
+# 	@echo " Running System Diagnosis..."
+# 	@echo "=============================================="
+# 	@docker compose exec backend python /app/tests/run_diagnosis.py || \
+# 		(echo ""; echo "ERROR: テスト実行に失敗しました。"; \
+# 		 echo "デバッグモードで起動していますか？ (make debug-up)"; \
+# 		 exit 1)
+# 	@echo ""
+# 	@echo "診断結果は logs/system_diagnosis.log に保存されました。"
+# 	# システム診断を実行（デバッグモード専用）
+test:
+	@echo "=============================================="
+	@echo " Installing Debug Dependencies..."
+	@echo "=============================================="
+	# backendコンテナ内に、その場だけ必要なライブラリをインストール
+	@docker compose exec backend pip install requests redis
+	@echo ""
+	@echo "=============================================="
+	@echo " Running System Diagnosis..."
+	@echo "=============================================="
+	@docker compose exec backend python /app/tests/run_diagnosis.py || \
+		(echo ""; echo "ERROR: テスト実行に失敗しました。"; \
+		 echo "デバッグモードで起動していますか？ (make debug-up)"; \
+		 exit 1)
+
+# 診断ログを表示
+show-diagnosis:
+	@cat logs/system_diagnosis.log 2>/dev/null || echo "診断ログが見つかりません。make test を実行してください。"

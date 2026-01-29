@@ -1,44 +1,277 @@
 """
-MVP版 Worker用データモデル
+nak-base Worker用データモデル
+Backend側と完全に同期（Phase 1-1対応）
+
+注意: このファイルは backend/app/models.py と同じ構造を維持すること
 """
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, CheckConstraint
+from sqlalchemy import (
+    Column, Integer, String, Text, DateTime, Boolean,
+    ForeignKey, Enum as SQLEnum, PrimaryKeyConstraint
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+import enum
+
 from .database import Base
 
 
+# ================== Enum Definitions (Backend側と完全一致) ==================
+
+class UserRole(str, enum.Enum):
+    ADMIN = "ADMIN"
+    PROFESSOR = "PROFESSOR"
+    STUDENT = "STUDENT"
+
+
+class FileRole(str, enum.Enum):
+    MAIN_PDF = "MAIN_PDF"
+    SOURCE_TEX = "SOURCE_TEX"
+    ADDITIONAL_FILE = "ADDITIONAL_FILE"
+
+
+class TaskStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    PARSING = "PARSING"
+    RAG = "RAG"
+    LLM = "LLM"
+    COMPLETED = "COMPLETED"
+    ERROR = "ERROR"
+
+
+class PaperStatus(str, enum.Enum):
+    UPLOADED = "UPLOADED"
+    PROCESSING = "PROCESSING"
+    PARSED = "PARSED"
+    EMBEDDED = "EMBEDDED"
+    FAILED = "FAILED"
+    COMPLETED = "COMPLETED"
+    ERROR = "ERROR"
+
+
+# ================== Table Definitions ==================
+
 class User(Base):
+    """
+    1. users (ユーザー管理)
+    """
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), nullable=False, default="Demo User")
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    role = Column(SQLEnum(UserRole), nullable=False, default=UserRole.STUDENT)
+    last_login_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
 
-    papers = relationship("Paper", back_populates="user")
+    # Relationships
+    owned_papers = relationship("Paper", back_populates="owner")
+    paper_authorships = relationship("PaperAuthor", back_populates="user")
 
 
 class Paper(Base):
+    """
+    2. papers (論文基本情報)
+    主キーは paper_id で統一（Backend側と一致）
+    """
     __tablename__ = "papers"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, default=1)
+    paper_id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     title = Column(String(500), nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
-
-    user = relationship("User", back_populates="papers")
-    tasks = relationship("Task", back_populates="paper")
-
-
-class Task(Base):
-    __tablename__ = "tasks"
-
-    id = Column(Integer, primary_key=True, index=True)
-    paper_id = Column(Integer, ForeignKey("papers.id", ondelete="CASCADE"), nullable=False)
-    file_path = Column(String(500), nullable=False)
-    parsed_text = Column(Text)
-    status = Column(String(20), nullable=False, default="pending")
-    result_json = Column(JSONB)
+    status = Column(SQLEnum(PaperStatus), nullable=False, default=PaperStatus.PROCESSING)
+    is_deleted = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
-    paper = relationship("Paper", back_populates="tasks")
+    # Relationships
+    owner = relationship("User", back_populates="owned_papers")
+    authors = relationship("PaperAuthor", back_populates="paper", cascade="all, delete-orphan")
+    versions = relationship("Version", back_populates="paper", cascade="all, delete-orphan")
+
+
+class PaperAuthor(Base):
+    """
+    3. paper_authors (著者管理 - 中間テーブル)
+    """
+    __tablename__ = "paper_authors"
+
+    paper_id = Column(Integer, ForeignKey("papers.paper_id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    author_order = Column(Integer, nullable=False, default=1)
+    is_corresponding_author = Column(Boolean, nullable=False, default=False)
+
+    # Relationships
+    paper = relationship("Paper", back_populates="authors")
+    user = relationship("User", back_populates="paper_authorships")
+
+    __table_args__ = (
+        PrimaryKeyConstraint("paper_id", "user_id"),
+    )
+
+
+class Version(Base):
+    """
+    4. versions (論文バージョン管理)
+    """
+    __tablename__ = "versions"
+
+    version_id = Column(Integer, primary_key=True, index=True)
+    paper_id = Column(Integer, ForeignKey("papers.paper_id", ondelete="CASCADE"), nullable=False)
+    version_number = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    paper = relationship("Paper", back_populates="versions")
+    files = relationship("File", back_populates="version", cascade="all, delete-orphan")
+    feedbacks = relationship("Feedback", back_populates="version", cascade="all, delete-orphan")
+    inference_tasks = relationship("InferenceTask", back_populates="version", cascade="all, delete-orphan")
+
+    # version_diffs relationships
+    current_diffs = relationship(
+        "VersionDiff",
+        foreign_keys="VersionDiff.current_version_id",
+        back_populates="current_version",
+        cascade="all, delete-orphan"
+    )
+    previous_diffs = relationship(
+        "VersionDiff",
+        foreign_keys="VersionDiff.previous_version_id",
+        back_populates="previous_version"
+    )
+
+
+class File(Base):
+    """
+    5. files (ファイル実体管理)
+    """
+    __tablename__ = "files"
+
+    file_id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey("versions.version_id", ondelete="CASCADE"), nullable=False)
+    file_role = Column(SQLEnum(FileRole), nullable=False, default=FileRole.MAIN_PDF)
+    is_primary = Column(Boolean, nullable=False, default=False)
+    drive_file_id = Column(String(255), nullable=True)
+    cache_path = Column(String(500), nullable=True)
+    is_cached = Column(Boolean, nullable=False, default=True)
+    file_hash = Column(String(128), nullable=True)
+    original_filename = Column(String(500), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    version = relationship("Version", back_populates="files")
+    embeddings = relationship("Embedding", back_populates="file", cascade="all, delete-orphan")
+
+
+class Feedback(Base):
+    """
+    6. feedbacks (解析結果報告)
+    """
+    __tablename__ = "feedbacks"
+
+    feedback_id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey("versions.version_id", ondelete="CASCADE"), nullable=False)
+    task_id = Column(Integer, ForeignKey("inference_tasks.task_id", ondelete="SET NULL"), nullable=True)
+    score_json = Column(JSONB, nullable=True)
+    comments_json = Column(JSONB, nullable=True)
+    overall_summary = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    version = relationship("Version", back_populates="feedbacks")
+    task = relationship("InferenceTask", back_populates="feedback")
+
+
+class InferenceTask(Base):
+    """
+    7. inference_tasks (タスク監視・リトライ管理)
+    Workerが主に参照するテーブル
+    """
+    __tablename__ = "inference_tasks"
+
+    task_id = Column(Integer, primary_key=True, index=True)
+    version_id = Column(Integer, ForeignKey("versions.version_id", ondelete="CASCADE"), nullable=False)
+    status = Column(SQLEnum(TaskStatus), nullable=False, default=TaskStatus.PENDING)
+    error_message = Column(Text, nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    conference_rule_id = Column(String(50), ForeignKey("conference_rules.rule_id", ondelete="SET NULL"), nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    version = relationship("Version", back_populates="inference_tasks")
+    conference_rule = relationship("ConferenceRule", back_populates="inference_tasks")
+    feedback = relationship("Feedback", back_populates="task", uselist=False)
+
+
+class Embedding(Base):
+    """
+    8. embeddings (RAG・ベクトル検索用)
+    注意: pgvector の Vector 型はWorkerでは使用しないため省略
+    """
+    __tablename__ = "embeddings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(Integer, ForeignKey("files.file_id", ondelete="CASCADE"), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    section_title = Column(String(255), nullable=True)
+    page_number = Column(Integer, nullable=True)
+    line_number = Column(Integer, nullable=True)
+    content_chunk = Column(Text, nullable=False)
+    location_json = Column(JSONB, nullable=True)
+    # embedding カラムは Vector 型だが、Workerでは直接操作しないため Text で代用
+    # 実際のDB上は Vector(1536) として存在
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    file = relationship("File", back_populates="embeddings")
+
+
+class ConferenceRule(Base):
+    """
+    9. conference_rules (学会別ルール定義)
+    """
+    __tablename__ = "conference_rules"
+
+    rule_id = Column(String(50), primary_key=True)
+    name = Column(String(255), nullable=False)
+    format_rules = Column(JSONB, nullable=True)
+    style_guide = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    inference_tasks = relationship("InferenceTask", back_populates="conference_rule")
+
+
+class VersionDiff(Base):
+    """
+    10. version_diffs (バージョン間差分管理)
+    """
+    __tablename__ = "version_diffs"
+
+    diff_id = Column(Integer, primary_key=True, index=True)
+    current_version_id = Column(Integer, ForeignKey("versions.version_id", ondelete="CASCADE"), nullable=False)
+    previous_version_id = Column(Integer, ForeignKey("versions.version_id", ondelete="SET NULL"), nullable=True)
+    text_diff_json = Column(JSONB, nullable=True)
+    semantic_diff_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Relationships
+    current_version = relationship(
+        "Version",
+        foreign_keys=[current_version_id],
+        back_populates="current_diffs"
+    )
+    previous_version = relationship(
+        "Version",
+        foreign_keys=[previous_version_id],
+        back_populates="previous_diffs"
+    )
+
+
+# ================== 後方互換性のためのエイリアス ==================
+# 旧コード（Task クラス参照）との互換性のため
+# 将来的には削除予定
+Task = InferenceTask

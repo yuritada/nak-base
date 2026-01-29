@@ -31,12 +31,33 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create Enum types
-    userrole_enum = postgresql.ENUM('Admin', 'Professor', 'Student', name='userrole', create_type=False)
-    filerole_enum = postgresql.ENUM('main_pdf', 'source_tex', 'additional_file', name='filerole', create_type=False)
-    taskstatus_enum = postgresql.ENUM('Pending', 'Parsing', 'RAG', 'LLM', 'Completed', 'Error', name='taskstatus', create_type=False)
-    paperstatus_enum = postgresql.ENUM('Processing', 'Completed', 'Error', name='paperstatus', create_type=False)
+    # 1. 既存の型があるか確認し、無ければ作成する関数を定義
+    def create_enum_if_not_exists(name, labels):
+        sync_conn = op.get_bind()
+        # 型が存在するかチェックするSQL
+        res = sync_conn.execute(sa.text(f"SELECT 1 FROM pg_type WHERE typname = '{name}'")).fetchone()
+        if not res:
+            # ラベルをカンマ区切りのクォート済み文字列にする
+            labels_str = ", ".join([f"'{l}'" for l in labels])
+            op.execute(f"CREATE TYPE {name} AS ENUM ({labels_str})")
+            print(f"  -> Type {name} created.")
+        else:
+            print(f"  -> Type {name} already exists, skipping.")
 
+    # 2. 各Enum型を作成（直接SQLを実行）
+    create_enum_if_not_exists('userrole', ['ADMIN', 'PROFESSOR', 'STUDENT'])
+    create_enum_if_not_exists('filerole', ['MAIN_PDF', 'SOURCE_TEX', 'ADDITIONAL_FILE'])
+    create_enum_if_not_exists('taskstatus', ['PENDING', 'PARSING', 'RAG', 'LLM', 'COMPLETED', 'ERROR'])
+    create_enum_if_not_exists('paperstatus', ['UPLOADED', 'PROCESSING', 'PARSED', 'EMBEDDED', 'FAILED', 'COMPLETED', 'ERROR'])
+
+    # 3. SQLAlchemyオブジェクトの定義（テーブル作成で使用するため）
+    # ※ここでは create_type=False を指定して、再作成を防ぐ
+    userrole_enum = postgresql.ENUM('ADMIN', 'PROFESSOR', 'STUDENT', name='userrole', create_type=False)
+    filerole_enum = postgresql.ENUM('MAIN_PDF', 'SOURCE_TEX', 'ADDITIONAL_FILE',name='filerole',create_type=False)
+    taskstatus_enum = postgresql.ENUM('PENDING', 'PARSING', 'RAG', 'LLM', 'COMPLETED', 'ERROR',name='taskstatus',create_type=False)
+    paperstatus_enum = postgresql.ENUM('UPLOADED', 'PROCESSING', 'PARSED', 'EMBEDDED', 'FAILED', 'COMPLETED', 'ERROR',name='paperstatus',create_type=False)
+
+    # Create enum types with checkfirst=True to avoid errors if already exists
     userrole_enum.create(op.get_bind(), checkfirst=True)
     filerole_enum.create(op.get_bind(), checkfirst=True)
     taskstatus_enum.create(op.get_bind(), checkfirst=True)
@@ -48,7 +69,7 @@ def upgrade() -> None:
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('email', sa.String(length=255), nullable=False),
         sa.Column('name', sa.String(length=255), nullable=False),
-        sa.Column('role', userrole_enum, nullable=False, server_default='Student'),
+        sa.Column('role', userrole_enum, nullable=False, server_default='STUDENT'),
         sa.Column('last_login_at', sa.DateTime(), nullable=True),
         sa.Column('created_at', sa.DateTime(), server_default=sa.func.now()),
         sa.PrimaryKeyConstraint('id')
@@ -74,7 +95,7 @@ def upgrade() -> None:
         sa.Column('paper_id', sa.Integer(), nullable=False),
         sa.Column('owner_id', sa.Integer(), nullable=True),
         sa.Column('title', sa.String(length=500), nullable=False),
-        sa.Column('status', paperstatus_enum, nullable=False, server_default='Processing'),
+        sa.Column('status', paperstatus_enum, nullable=False, server_default='PROCESSING'),
         sa.Column('is_deleted', sa.Boolean(), nullable=False, server_default='false'),
         sa.Column('created_at', sa.DateTime(), server_default=sa.func.now()),
         sa.Column('updated_at', sa.DateTime(), server_default=sa.func.now(), onupdate=sa.func.now()),
@@ -112,7 +133,7 @@ def upgrade() -> None:
         'files',
         sa.Column('file_id', sa.Integer(), nullable=False),
         sa.Column('version_id', sa.Integer(), nullable=False),
-        sa.Column('file_role', filerole_enum, nullable=False, server_default='main_pdf'),
+        sa.Column('file_role', filerole_enum, nullable=False, server_default='MAIN_PDF'),
         sa.Column('is_primary', sa.Boolean(), nullable=False, server_default='false'),
         sa.Column('drive_file_id', sa.String(length=255), nullable=True),
         sa.Column('cache_path', sa.String(length=500), nullable=True),
@@ -130,7 +151,7 @@ def upgrade() -> None:
         'inference_tasks',
         sa.Column('task_id', sa.Integer(), nullable=False),
         sa.Column('version_id', sa.Integer(), nullable=False),
-        sa.Column('status', taskstatus_enum, nullable=False, server_default='Pending'),
+        sa.Column('status', taskstatus_enum, nullable=False, server_default='PENDING'),
         sa.Column('error_message', sa.Text(), nullable=True),
         sa.Column('retry_count', sa.Integer(), nullable=False, server_default='0'),
         sa.Column('conference_rule_id', sa.String(length=50), nullable=True),
@@ -199,7 +220,7 @@ def upgrade() -> None:
 
     # Insert demo user for backward compatibility
     op.execute(
-        "INSERT INTO users (id, email, name, role) VALUES (1, 'demo@example.com', 'Demo User', 'Student') ON CONFLICT (id) DO NOTHING"
+        "INSERT INTO users (id, email, name, role) VALUES (1, 'demo@example.com', 'Demo User', 'STUDENT') ON CONFLICT (id) DO NOTHING"
     )
 
 
