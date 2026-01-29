@@ -1,13 +1,15 @@
 """
-MVP版 キューサービス
-シンプルなFIFOキュー（task_idのみ）
+Phase 1.5 キューサービス
+job_type対応版
 """
+import json
 import redis
 from ..config import get_settings
 
 settings = get_settings()
 
 TASK_QUEUE = "tasks"
+NOTIFICATION_CHANNEL = "task_notifications"
 
 
 def get_redis_client():
@@ -17,7 +19,7 @@ def get_redis_client():
 
 def push_task(task_id: int) -> bool:
     """
-    タスクIDをキューに追加
+    タスクIDをキューに追加（後方互換性のため維持）
     """
     client = get_redis_client()
     try:
@@ -25,6 +27,63 @@ def push_task(task_id: int) -> bool:
         return True
     except Exception as e:
         print(f"Error pushing task to queue: {e}")
+        return False
+
+
+def push_task_with_payload(task_id: int, job_type: str = "ANALYSIS") -> bool:
+    """
+    タスクIDとジョブタイプをキューに追加
+
+    Args:
+        task_id: タスクID
+        job_type: "ANALYSIS" (通常解析) または "REFERENCE_ONLY" (参考論文)
+
+    Returns:
+        bool: 成功/失敗
+    """
+    client = get_redis_client()
+    try:
+        payload = json.dumps({
+            "task_id": task_id,
+            "job_type": job_type
+        })
+        client.rpush(TASK_QUEUE, payload)
+        return True
+    except Exception as e:
+        print(f"Error pushing task to queue: {e}")
+        return False
+
+
+def publish_notification(
+    task_id: int,
+    status: str,
+    phase: str | None = None,
+    error_message: str | None = None
+) -> bool:
+    """
+    タスク通知をRedis Pub/Subに発行
+
+    Args:
+        task_id: タスクID
+        status: タスクステータス
+        phase: 処理フェーズの説明
+        error_message: エラーメッセージ
+
+    Returns:
+        bool: 発行成功/失敗
+    """
+    client = get_redis_client()
+    try:
+        notification = {
+            "task_id": task_id,
+            "status": status,
+            "phase": phase,
+            "error_message": error_message,
+        }
+        client.publish(NOTIFICATION_CHANNEL, json.dumps(notification))
+        return True
+    except Exception as e:
+        print(f"Error publishing notification: {e}")
         return False
 
 

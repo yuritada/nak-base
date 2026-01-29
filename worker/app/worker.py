@@ -17,6 +17,27 @@ from .models import InferenceTask, File, Feedback, Paper, Version, TaskStatus, P
 settings = get_settings()
 
 TASK_QUEUE = "tasks"
+NOTIFICATION_CHANNEL = "task_notifications"
+
+
+def publish_notification(task_id: int, status: str, phase: str | None = None, error_message: str | None = None):
+    """
+    タスク通知をRedis Pub/Subに発行
+    フロントエンドのSSEに中継される
+    """
+    try:
+        client = get_redis_client()
+        notification = {
+            "task_id": task_id,
+            "status": status,
+            "phase": phase,
+            "error_message": error_message,
+        }
+        client.publish(NOTIFICATION_CHANNEL, json.dumps(notification))
+        if settings.debug_mode:
+            print(f"【デバッグ】通知発行: {notification}")
+    except Exception as e:
+        print(f"Failed to publish notification: {e}")
 
 # Ollamaプロンプト（固定）
 OLLAMA_PROMPT = """以下の論文のテキストを分析し、JSON形式で回答してください。
@@ -27,11 +48,11 @@ OLLAMA_PROMPT = """以下の論文のテキストを分析し、JSON形式で回
 3. 改善提案（suggestions）: 論文を改善するための具体的な提案
 
 ## 出力形式（JSON）
-{
+{{
   "summary": "論文の要約...",
   "typos": ["誤字1", "誤字2"],
   "suggestions": ["提案1", "提案2", "提案3"]
-}
+}}
 
 ## 論文テキスト
 {text}
@@ -43,15 +64,38 @@ def get_redis_client():
     return redis.from_url(settings.redis_url)
 
 
-def call_parser(file_path: str) -> str:
-    """Parserサービスを呼び出してテキスト抽出"""
+def call_parser(file_path: str) -> dict:
+    """
+    Parserサービスを呼び出してテキスト抽出
+    Phase 1-2: 新形式（content, meta, pages, chunks）に対応
+    """
     response = requests.post(
         f"{settings.parser_url}/parse",
         json={"file_path": file_path},
-        timeout=60
+        timeout=120  # ZIP/TeX処理は時間がかかる場合がある
     )
     response.raise_for_status()
-    return response.json()["text"]
+    result = response.json()
+
+    # 新形式: content フィールドを使用
+    # 旧形式（legacy）との互換性: text フィールドもチェック
+    if "content" in result:
+        return {
+            "text": result["content"],
+            "meta": result.get("meta", {}),
+            "pages": result.get("pages", []),
+            "chunks": result.get("chunks", [])
+        }
+    elif "text" in result:
+        # Legacy形式
+        return {
+            "text": result["text"],
+            "meta": {},
+            "pages": [],
+            "chunks": []
+        }
+    else:
+        raise ValueError("Parser response missing both 'content' and 'text' fields")
 
 
 def call_ollama(text: str) -> dict:
@@ -215,19 +259,25 @@ def process_task(task_id: int):
         task.status = TaskStatus.PARSING
         task.started_at = datetime.utcnow()
         db.commit()
+        publish_notification(task_id, "PARSING", "PDF解析中 (1/3)")
 
         # 3. Parserを呼び出してテキスト抽出
         if settings.debug_mode:
             print(f"【デバッグ】Parserコンテナへテキスト抽出を依頼中... (Path: {file_path})")
         print("Calling Parser service...")
-        parsed_text = call_parser(file_path)
+        parse_result = call_parser(file_path)
+        parsed_text = parse_result["text"]
+        parse_meta = parse_result.get("meta", {})
         if settings.debug_mode:
             print(f"【デバッグ】Parserより受領。抽出文字数: {len(parsed_text)}文字")
+            if parse_meta:
+                print(f"【デバッグ】ファイル種別: {parse_meta.get('file_type', 'unknown')}, ページ数: {parse_meta.get('num_pages', 0)}")
         print(f"Parsed text length: {len(parsed_text)}")
 
         # ステータス更新: LLM
         task.status = TaskStatus.LLM
         db.commit()
+        publish_notification(task_id, "LLM", "AI分析中 (2/3)")
 
         # 4. Ollamaを呼び出して分析
         if settings.debug_mode:
@@ -258,6 +308,7 @@ def process_task(task_id: int):
             paper.status = PaperStatus.COMPLETED
 
         db.commit()
+        publish_notification(task_id, "COMPLETED", "分析完了")
         print(f"Task {task_id} completed successfully")
 
     except Exception as e:
@@ -277,6 +328,7 @@ def process_task(task_id: int):
                     task.version.paper.status = PaperStatus.ERROR
 
                 db.commit()
+                publish_notification(task_id, "ERROR", error_message=str(e))
         except Exception as inner_e:
             print(f"Failed to update error status: {inner_e}")
 
@@ -288,8 +340,10 @@ def parse_task_data(data: bytes) -> tuple:
     """
     Parse task data from Redis.
     Returns: (task_type, task_data)
-    - For regular tasks: ("REGULAR", task_id as int)
+    - For regular tasks: ("REGULAR", {"task_id": int, "job_type": str})
+    - For reference tasks: ("REFERENCE_ONLY", {"task_id": int, "job_type": str})
     - For diagnosis tasks: ("SYSTEM_DIAGNOSIS", task_data as dict)
+    - Legacy format (task_id only): ("REGULAR", {"task_id": int, "job_type": "ANALYSIS"})
     """
     try:
         decoded = data.decode("utf-8")
@@ -297,13 +351,22 @@ def parse_task_data(data: bytes) -> tuple:
         # Try to parse as JSON first
         try:
             task_data = json.loads(decoded)
-            if isinstance(task_data, dict) and task_data.get("type") == "SYSTEM_DIAGNOSIS":
-                return ("SYSTEM_DIAGNOSIS", task_data)
+            if isinstance(task_data, dict):
+                # System diagnosis task
+                if task_data.get("type") == "SYSTEM_DIAGNOSIS":
+                    return ("SYSTEM_DIAGNOSIS", task_data)
+                # New format with job_type
+                if "task_id" in task_data:
+                    job_type = task_data.get("job_type", "ANALYSIS")
+                    if job_type == "REFERENCE_ONLY":
+                        return ("REFERENCE_ONLY", task_data)
+                    return ("REGULAR", task_data)
         except json.JSONDecodeError:
             pass
 
-        # If not JSON or not diagnosis, treat as regular task ID
-        return ("REGULAR", int(decoded))
+        # Legacy format: plain task_id number
+        task_id = int(decoded)
+        return ("REGULAR", {"task_id": task_id, "job_type": "ANALYSIS"})
 
     except Exception as e:
         print(f"Error parsing task data: {e}")
@@ -314,7 +377,7 @@ def main():
     """Main worker loop."""
     print("=" * 50)
     print(" NAK-BASE AI INFERENCE WORKER")
-    print(" Phase 1-1: New Schema Support")
+    print(" Phase 1.5: SSE + Reference Mode Support")
     print("=" * 50)
     print(f"Redis: {settings.redis_url}")
     print(f"Ollama: {settings.ollama_url}")
@@ -349,9 +412,16 @@ def main():
                     print(f"Received SYSTEM_DIAGNOSIS task")
                     process_diagnosis_task(task_data)
 
+                elif task_type == "REFERENCE_ONLY":
+                    task_id = task_data.get("task_id")
+                    print(f"Received REFERENCE_ONLY task: {task_id} (skipping analysis)")
+                    # 参考論文はすでにCOMPLETEDステータスなのでスキップ
+                    # 必要に応じてインデックス作成等の軽量処理を追加可能
+
                 elif task_type == "REGULAR":
-                    task_id = task_data
-                    print(f"Received regular task: {task_id}")
+                    task_id = task_data.get("task_id")
+                    job_type = task_data.get("job_type", "ANALYSIS")
+                    print(f"Received regular task: {task_id} (job_type: {job_type})")
                     process_task(task_id)
 
                 else:

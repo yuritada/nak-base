@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from .routers import auth, papers
+from .routers import auth, papers, stream
 from .services.queue_service import get_queue_length
 from .database import engine, Base
 from .config import get_settings
@@ -197,8 +197,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="nak-base API",
-    description="論文フィードバックシステム - Phase 1-1 DB Refresh",
-    version="1.1.0",
+    description="論文フィードバックシステム - Phase 1.5 SSE対応",
+    version="1.5.0",
     lifespan=lifespan
 )
 
@@ -214,6 +214,7 @@ app.add_middleware(
 # Include routers
 app.include_router(auth.router)
 app.include_router(papers.router)
+app.include_router(stream.router)
 
 
 @app.get("/")
@@ -222,8 +223,8 @@ def root():
     return {
         "service": "nak-base API",
         "status": "running",
-        "version": "1.1.0",
-        "phase": "1-1 DB Refresh"
+        "version": "1.5.0",
+        "phase": "1.5 SSE Support"
     }
 
 

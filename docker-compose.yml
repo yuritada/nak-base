@@ -103,6 +103,7 @@ services:
       dockerfile: Dockerfile
     container_name: nak_base_worker
     environment:
+      PYTHONUNBUFFERED: "1"
       DATABASE_URL: postgresql://${POSTGRES_USER:-nakbase}:${POSTGRES_PASSWORD:-nakbase_secret}@db:5432/${POSTGRES_DB:-nakbase}
       REDIS_URL: redis://redis:6379/0
       OLLAMA_URL: http://ollama:11434
