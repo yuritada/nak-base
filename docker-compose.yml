@@ -1,7 +1,7 @@
 services:
-  # PostgreSQL (MVP: 標準版、pgvectorなし)
+  # PostgreSQL with pgvector extension
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: nak_base_db
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nakbase}
@@ -9,7 +9,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-nakbase}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      # init.sql removed - using Alembic migrations instead
     ports:
       - "5432:5432"
     healthcheck:

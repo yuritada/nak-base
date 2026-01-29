@@ -1,5 +1,6 @@
 -- nak-base MVP Database Schema
 -- シンプルな3テーブル構成
+-- <このファイルは非マウントです。実際に読まれていません！！！>
 
 -- Users table (デモユーザーのみ)
 CREATE TABLE users (
