@@ -1,6 +1,6 @@
 """
-MVP版 論文ルーター
-シンプルなアップロード・一覧・詳細取得
+論文ルーター
+Phase 1-1: 新モデル構造対応
 """
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -9,8 +9,11 @@ import os
 import uuid
 
 from ..database import get_db
-from ..models import Paper, Task
-from ..schemas import PaperResponse, PaperWithTasks, TaskResponse, UploadResponse
+from ..models import Paper, Version, File as FileModel, InferenceTask, PaperStatus, TaskStatus, FileRole
+from ..schemas import (
+    PaperResponse, PaperWithVersions, PaperDetail,
+    VersionResponse, InferenceTaskResponse, UploadResponse
+)
 from ..services.queue_service import push_task
 from ..config import get_settings
 
@@ -20,18 +23,29 @@ settings = get_settings()
 
 @router.get("/", response_model=List[PaperResponse])
 def list_papers(db: Session = Depends(get_db)):
-    """論文一覧を取得（3秒ポーリング用）"""
-    papers = db.query(Paper).order_by(Paper.created_at.desc()).all()
+    """論文一覧を取得（削除されていないもののみ）"""
+    papers = db.query(Paper).filter(Paper.is_deleted == False).order_by(Paper.created_at.desc()).all()
     return papers
 
 
-@router.get("/{paper_id}", response_model=PaperWithTasks)
+@router.get("/{paper_id}", response_model=PaperDetail)
 def get_paper(paper_id: int, db: Session = Depends(get_db)):
-    """論文詳細を取得（タスク含む）"""
-    paper = db.query(Paper).filter(Paper.id == paper_id).first()
+    """論文詳細を取得（バージョンとファイル含む）"""
+    paper = db.query(Paper).filter(Paper.paper_id == paper_id, Paper.is_deleted == False).first()
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
     return paper
+
+
+@router.get("/{paper_id}/versions", response_model=List[VersionResponse])
+def list_versions(paper_id: int, db: Session = Depends(get_db)):
+    """論文のバージョン一覧を取得"""
+    paper = db.query(Paper).filter(Paper.paper_id == paper_id).first()
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    versions = db.query(Version).filter(Version.paper_id == paper_id).order_by(Version.version_number.desc()).all()
+    return versions
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -43,10 +57,13 @@ async def upload_paper(
     """
     論文をアップロード
 
+    新スキーマでのフロー:
     1. PDFファイルをローカルボリュームに保存
-    2. papersレコード作成
-    3. tasksレコード作成（status=pending）
-    4. Redisにtask_idをPUSH
+    2. Paper レコード作成
+    3. Version レコード作成 (version_number=1)
+    4. File レコード作成
+    5. InferenceTask レコード作成 (status=Pending)
+    6. Redisに task_id をPUSH
     """
     if settings.debug_mode:
         print(f"【デバッグ】論文アップロード受信: タイトル='{title}', ファイル='{file.filename}'")
@@ -71,45 +88,90 @@ async def upload_paper(
     if settings.debug_mode:
         print(f"【デバッグ】ローカルストレージに保存完了: {file_path}")
 
-    # Paper作成
+    # 1. Paper作成
     paper = Paper(
-        user_id=1,  # 固定デモユーザー
-        title=title
+        owner_id=1,  # デモユーザー（後でOAuth実装時に変更）
+        title=title,
+        status=PaperStatus.PROCESSING
     )
     db.add(paper)
     db.commit()
     db.refresh(paper)
 
-    # Task作成
-    task = Task(
-        paper_id=paper.id,
-        file_path=file_path,
-        status="pending"
+    if settings.debug_mode:
+        print(f"【デバッグ】Paper作成: paper_id={paper.paper_id}")
+
+    # 2. Version作成
+    version = Version(
+        paper_id=paper.paper_id,
+        version_number=1
+    )
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+
+    if settings.debug_mode:
+        print(f"【デバッグ】Version作成: version_id={version.version_id}")
+
+    # 3. File作成
+    file_record = FileModel(
+        version_id=version.version_id,
+        file_role=FileRole.MAIN_PDF,
+        is_primary=True,
+        cache_path=file_path,
+        is_cached=True,
+        original_filename=file.filename
+    )
+    db.add(file_record)
+    db.commit()
+    db.refresh(file_record)
+
+    if settings.debug_mode:
+        print(f"【デバッグ】File作成: file_id={file_record.file_id}")
+
+    # 4. InferenceTask作成
+    task = InferenceTask(
+        version_id=version.version_id,
+        status=TaskStatus.PENDING
     )
     db.add(task)
     db.commit()
     db.refresh(task)
 
     if settings.debug_mode:
-        print(f"【デバッグ】DB登録完了: Paper ID={paper.id}, Task ID={task.id}")
+        print(f"【デバッグ】InferenceTask作成: task_id={task.task_id}")
 
-    # Redisにタスク追加
-    push_task(task.id)
+    # 5. Redisにタスク追加
+    push_task(task.task_id)
 
     if settings.debug_mode:
-        print(f"【デバッグ】RedisキューにTask ID={task.id}を投入しました")
+        print(f"【デバッグ】RedisキューにTask ID={task.task_id}を投入しました")
 
     return UploadResponse(
         message="Upload successful",
-        paper_id=paper.id,
-        task_id=task.id
+        paper_id=paper.paper_id,
+        version_id=version.version_id,
+        task_id=task.task_id
     )
 
 
-@router.get("/tasks/{task_id}", response_model=TaskResponse)
+@router.get("/tasks/{task_id}", response_model=InferenceTaskResponse)
 def get_task(task_id: int, db: Session = Depends(get_db)):
-    """タスク詳細を取得（結果確認用）"""
-    task = db.query(Task).filter(Task.id == task_id).first()
+    """タスク詳細を取得"""
+    task = db.query(InferenceTask).filter(InferenceTask.task_id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+@router.delete("/{paper_id}")
+def delete_paper(paper_id: int, db: Session = Depends(get_db)):
+    """論文を論理削除"""
+    paper = db.query(Paper).filter(Paper.paper_id == paper_id).first()
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    paper.is_deleted = True
+    db.commit()
+
+    return {"message": "Paper deleted successfully", "paper_id": paper_id}
