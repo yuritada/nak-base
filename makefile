@@ -30,6 +30,7 @@ help:
 # コンテナの起動（本番モード）
 up:
 	$(COMPOSE) up -d
+	$(COMPOSE) logs -f --tail="all" > logs.txt 2>&1 &
 
 # イメージのビルド
 build:
@@ -38,22 +39,36 @@ build:
 # コンテナの停止
 down:
 	$(COMPOSE) down
+	-pkill -f "$(COMPOSE) logs"
 
 # 再起動
 restart:
 	$(COMPOSE) down
 	$(COMPOSE) up -d
 
+# 強力なクリーンアップ（DB、ボリューム、イメージ、キャッシュ、ログを全て吹き飛ばす）
+# デバッグ用を含めた全構成ファイルを定義
+COMPOSE_FILES = -f docker-compose.yml -f docker-compose.debug.yml
+
 # 強力なクリーンアップ
 clean:
-	$(COMPOSE) down --volumes --rmi all --remove-orphans
+	@echo "システム全体の完全リセットを開始します..."
+	# 1. 両方の設定ファイルを明示的に指定して、ボリュームごと削除
+	docker-compose $(COMPOSE_FILES) down --volumes --rmi all --remove-orphans
+	# 2. 名前のないボリュームや、迷子になったボリュームを強制削除
+	docker volume prune -f
+	# 3. キャッシュとログの削除
 	docker builder prune -f
+	find . -name "__pycache__" -type d -exec rm -rf {} +
+	find . -name "*.pyc" -delete
+	rm -rf logs/
+	rm -f logs.txt
 	@echo "完全クリーンアップ完了"
+	
 
 # ログの表示
 logs:
-	$(COMPOSE) logs > logs.txt 2>&1
-	$(COMPOSE) logs -f
+	$(COMPOSE) logs -f --tail="all"
 
 # 特定サービスのログ
 logs-backend:
@@ -85,6 +100,7 @@ debug-up:
 	@echo "デバッグモードで起動中..."
 	@mkdir -p logs
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.debug.yml up -d
+	$(COMPOSE) logs -f --tail="all" > logs.txt 2>&1 &
 	@echo ""
 	@echo "デバッグモードで起動しました。"
 	@echo "テストを実行するには: make test"
@@ -92,9 +108,27 @@ debug-up:
 # デバッグモードを停止
 debug-down:
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.debug.yml down
+	-pkill -f "$(COMPOSE) logs"
 
 # システム診断を実行（デバッグモード専用）
+# test:
+# 	@echo "=============================================="
+# 	@echo " Running System Diagnosis..."
+# 	@echo "=============================================="
+# 	@docker compose exec backend python /app/tests/run_diagnosis.py || \
+# 		(echo ""; echo "ERROR: テスト実行に失敗しました。"; \
+# 		 echo "デバッグモードで起動していますか？ (make debug-up)"; \
+# 		 exit 1)
+# 	@echo ""
+# 	@echo "診断結果は logs/system_diagnosis.log に保存されました。"
+# 	# システム診断を実行（デバッグモード専用）
 test:
+	@echo "=============================================="
+	@echo " Installing Debug Dependencies..."
+	@echo "=============================================="
+	# backendコンテナ内に、その場だけ必要なライブラリをインストール
+	@docker compose exec backend pip install requests redis
+	@echo ""
 	@echo "=============================================="
 	@echo " Running System Diagnosis..."
 	@echo "=============================================="
@@ -102,8 +136,6 @@ test:
 		(echo ""; echo "ERROR: テスト実行に失敗しました。"; \
 		 echo "デバッグモードで起動していますか？ (make debug-up)"; \
 		 exit 1)
-	@echo ""
-	@echo "診断結果は logs/system_diagnosis.log に保存されました。"
 
 # 診断ログを表示
 show-diagnosis:

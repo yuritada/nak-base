@@ -1,6 +1,8 @@
 """
 nak-base Pydanticスキーマ
 Phase 1-1: 新モデル構造対応
+
+Enum値は全て大文字で統一（DB側と一致させる）
 """
 from pydantic import BaseModel
 from typing import Optional, List
@@ -8,33 +10,37 @@ from datetime import datetime
 from enum import Enum
 
 
-# ================== Enum Definitions ==================
+# ================== Enum Definitions (全大文字で統一) ==================
 
 class UserRoleEnum(str, Enum):
-    ADMIN = "Admin"
-    PROFESSOR = "Professor"
-    STUDENT = "Student"
+    ADMIN = "ADMIN"
+    PROFESSOR = "PROFESSOR"
+    STUDENT = "STUDENT"
 
 
 class FileRoleEnum(str, Enum):
-    MAIN_PDF = "main_pdf"
-    SOURCE_TEX = "source_tex"
-    ADDITIONAL_FILE = "additional_file"
+    MAIN_PDF = "MAIN_PDF"
+    SOURCE_TEX = "SOURCE_TEX"
+    ADDITIONAL_FILE = "ADDITIONAL_FILE"
 
 
 class TaskStatusEnum(str, Enum):
-    PENDING = "Pending"
-    PARSING = "Parsing"
+    PENDING = "PENDING"
+    PARSING = "PARSING"
     RAG = "RAG"
     LLM = "LLM"
-    COMPLETED = "Completed"
-    ERROR = "Error"
+    COMPLETED = "COMPLETED"
+    ERROR = "ERROR"
 
 
 class PaperStatusEnum(str, Enum):
-    PROCESSING = "Processing"
-    COMPLETED = "Completed"
-    ERROR = "Error"
+    UPLOADED = "UPLOADED"
+    PROCESSING = "PROCESSING"
+    PARSED = "PARSED"
+    EMBEDDED = "EMBEDDED"
+    FAILED = "FAILED"
+    COMPLETED = "COMPLETED"
+    ERROR = "ERROR"
 
 
 # ================== User Schemas ==================

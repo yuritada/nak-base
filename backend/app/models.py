@@ -1,6 +1,8 @@
 """
 nak-base 完成形データモデル
 設計資料集に基づく全10テーブル構成
+
+Enum値は全て大文字で統一（DB側と一致させる）
 """
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Boolean,
@@ -15,33 +17,37 @@ import enum
 from .database import Base
 
 
-# ================== Enum Definitions ==================
+# ================== Enum Definitions (全大文字で統一) ==================
 
 class UserRole(str, enum.Enum):
-    ADMIN = "Admin"
-    PROFESSOR = "Professor"
-    STUDENT = "Student"
+    ADMIN = "ADMIN"
+    PROFESSOR = "PROFESSOR"
+    STUDENT = "STUDENT"
 
 
 class FileRole(str, enum.Enum):
-    MAIN_PDF = "main_pdf"
-    SOURCE_TEX = "source_tex"
-    ADDITIONAL_FILE = "additional_file"
+    MAIN_PDF = "MAIN_PDF"
+    SOURCE_TEX = "SOURCE_TEX"
+    ADDITIONAL_FILE = "ADDITIONAL_FILE"
 
 
 class TaskStatus(str, enum.Enum):
-    PENDING = "Pending"
-    PARSING = "Parsing"
+    PENDING = "PENDING"
+    PARSING = "PARSING"
     RAG = "RAG"
     LLM = "LLM"
-    COMPLETED = "Completed"
-    ERROR = "Error"
+    COMPLETED = "COMPLETED"
+    ERROR = "ERROR"
 
 
 class PaperStatus(str, enum.Enum):
-    PROCESSING = "Processing"
-    COMPLETED = "Completed"
-    ERROR = "Error"
+    UPLOADED = "UPLOADED"
+    PROCESSING = "PROCESSING"
+    PARSED = "PARSED"
+    EMBEDDED = "EMBEDDED"
+    FAILED = "FAILED"
+    COMPLETED = "COMPLETED"
+    ERROR = "ERROR"
 
 
 # ================== Table Definitions ==================
@@ -69,6 +75,7 @@ class Paper(Base):
     """
     2. papers (論文基本情報)
     論文の箱となるメタデータ
+    主キーは paper_id で統一
     """
     __tablename__ = "papers"
 
