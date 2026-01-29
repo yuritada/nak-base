@@ -7,3 +7,6 @@ pydantic==2.5.3
 pymupdf==1.23.8
 chardet==5.2.0
 python-multipart==0.0.6
+
+# Phase 1.5: DOCX support
+python-docx==1.1.0

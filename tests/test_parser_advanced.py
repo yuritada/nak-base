@@ -37,6 +37,7 @@ def test_parser_root():
     assert "pdf" in data["features"]
     assert "tex" in data["features"]
     assert "zip" in data["features"]
+    assert "docx" in data["features"]
     assert "bbox" in data["features"]
     assert "chunks" in data["features"]
 
@@ -236,6 +237,57 @@ This is the methods section from another file.
             os.unlink(zip_path)
 
 
+def test_parse_docx_file():
+    """Test DOCX file parsing"""
+    try:
+        from docx import Document
+        from docx.shared import Pt
+    except ImportError:
+        print("WARNING: python-docx not installed, skipping DOCX test")
+        return
+
+    # Create a temporary DOCX file
+    doc = Document()
+    doc.add_heading('Test Document', 0)
+    doc.add_heading('Introduction', level=1)
+    doc.add_paragraph('This is the introduction paragraph for testing.')
+    doc.add_heading('Methods', level=1)
+    doc.add_paragraph('This section describes the methods used.')
+    doc.add_heading('Conclusion', level=1)
+    doc.add_paragraph('This is the conclusion of the test document.')
+
+    docx_path = os.path.join(STORAGE_PATH, "test_document.docx")
+    doc.save(docx_path)
+
+    try:
+        response = requests.post(
+            f"{PARSER_URL}/parse",
+            json={"file_path": docx_path}
+        )
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+
+        data = response.json()
+        assert "content" in data, "Response should have 'content' field"
+        assert "meta" in data, "Response should have 'meta' field"
+        assert "chunks" in data, "Response should have 'chunks' field"
+
+        # Check meta structure
+        meta = data["meta"]
+        assert meta["file_type"] == "docx", f"Expected file_type 'docx', got {meta['file_type']}"
+
+        # Check content contains expected text
+        content = data["content"]
+        assert "Introduction" in content, "Content should contain 'Introduction'"
+        assert "Methods" in content, "Content should contain 'Methods'"
+        assert "Conclusion" in content, "Content should contain 'Conclusion'"
+
+        print(f"SUCCESS: Parsed DOCX file with {len(data['chunks'])} chunks")
+
+    finally:
+        if os.path.exists(docx_path):
+            os.unlink(docx_path)
+
+
 def test_file_not_found():
     """Test error handling for non-existent file"""
     response = requests.post(
@@ -246,19 +298,20 @@ def test_file_not_found():
 
 
 def test_unsupported_file_type():
-    """Test error handling for unsupported file types"""
+    """Test error handling for unsupported file types (.ppt, .exe など)"""
     # Create a temp file with unsupported extension
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.docx', dir=STORAGE_PATH, delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.ppt', dir=STORAGE_PATH, delete=False) as f:
         f.write("test content")
         test_path = f.name
 
     try:
         response = requests.post(
             f"{PARSER_URL}/parse",
-            json={"file_path": test_path, "file_type": "docx"}
+            json={"file_path": test_path}
         )
-        # Should either fail or fallback to PDF parsing
-        assert response.status_code in [400, 500]
+        # Should fail with 400, 422, or 500 for unsupported file types
+        assert response.status_code in [400, 422, 500]
+        print(f"SUCCESS: Unsupported file type rejected with status {response.status_code}")
     finally:
         os.unlink(test_path)
 
@@ -266,7 +319,7 @@ def test_unsupported_file_type():
 def run_all_tests():
     """Run all parser tests"""
     print("=" * 60)
-    print(" PARSER SERVICE TESTS - Phase 1-2")
+    print(" PARSER SERVICE TESTS - Phase 1.5 (DOCX Support)")
     print("=" * 60)
 
     tests = [
@@ -276,6 +329,7 @@ def run_all_tests():
         ("Legacy Endpoint", test_parse_legacy_endpoint),
         ("TeX File Parse", test_parse_tex_file),
         ("ZIP with TeX", test_parse_zip_with_tex),
+        ("DOCX File Parse", test_parse_docx_file),
         ("File Not Found", test_file_not_found),
         ("Unsupported File Type", test_unsupported_file_type),
     ]

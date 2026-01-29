@@ -20,6 +20,7 @@ class UserRoleEnum(str, Enum):
 
 class FileRoleEnum(str, Enum):
     MAIN_PDF = "MAIN_PDF"
+    MAIN_DOCX = "MAIN_DOCX"
     SOURCE_TEX = "SOURCE_TEX"
     ADDITIONAL_FILE = "ADDITIONAL_FILE"
 

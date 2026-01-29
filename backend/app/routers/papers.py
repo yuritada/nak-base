@@ -119,19 +119,22 @@ async def upload_paper(
     if settings.debug_mode:
         print(f"【デバッグ】論文アップロード受信: タイトル='{title}', ファイル='{file.filename}', is_reference={is_reference}")
 
-    # PDF, ZIP, TeXを受付
+    # PDF, ZIP, TeX, DOCXを受付
     lower_filename = file.filename.lower()
-    allowed_extensions = ('.pdf', '.zip', '.tex')
+    allowed_extensions = ('.pdf', '.zip', '.tex', '.docx')
     if not any(lower_filename.endswith(ext) for ext in allowed_extensions):
         raise HTTPException(
             status_code=400,
-            detail=f"Only PDF, ZIP, and TeX files are accepted. Got: {file.filename}"
+            detail=f"Only PDF, ZIP, TeX, and DOCX files are accepted. Got: {file.filename}"
         )
 
     # ファイル拡張子を取得してFileRoleを決定
     if lower_filename.endswith('.pdf'):
         file_ext = '.pdf'
         file_role = FileRole.MAIN_PDF
+    elif lower_filename.endswith('.docx'):
+        file_ext = '.docx'
+        file_role = FileRole.MAIN_DOCX
     elif lower_filename.endswith('.zip'):
         file_ext = '.zip'
         file_role = FileRole.SOURCE_TEX

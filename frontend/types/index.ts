@@ -7,7 +7,7 @@
 
 export type UserRoleEnum = 'ADMIN' | 'PROFESSOR' | 'STUDENT';
 
-export type FileRoleEnum = 'MAIN_PDF' | 'SOURCE_TEX' | 'ADDITIONAL_FILE';
+export type FileRoleEnum = 'MAIN_PDF' | 'MAIN_DOCX' | 'SOURCE_TEX' | 'ADDITIONAL_FILE';
 
 export type TaskStatusEnum = 'PENDING' | 'PARSING' | 'RAG' | 'LLM' | 'COMPLETED' | 'ERROR';
 

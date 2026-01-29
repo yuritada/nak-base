@@ -11,6 +11,7 @@ class FileType(str, Enum):
     PDF = "pdf"
     ZIP = "zip"
     TEX = "tex"
+    DOCX = "docx"
 
 
 # ================== Request Schemas ==================
