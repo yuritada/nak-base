@@ -16,6 +16,7 @@ from ..schemas import (
     ConferenceRuleUpdate,
     ConferenceRuleResponse
 )
+from ..services.embedding_service import generate_conference_rule_embedding
 
 router = APIRouter(prefix="/conferences", tags=["conferences"])
 
@@ -75,11 +76,19 @@ def create_conference_rule(
             detail=f"Conference rule '{rule_data.rule_id}' already exists"
         )
 
+    # Embedding生成（セマンティック検索用）
+    embedding = generate_conference_rule_embedding(
+        name=rule_data.name,
+        style_guide=rule_data.style_guide or "",
+        format_rules=rule_data.format_rules
+    )
+
     rule = ConferenceRule(
         rule_id=rule_data.rule_id,
         name=rule_data.name,
         format_rules=rule_data.format_rules,
-        style_guide=rule_data.style_guide
+        style_guide=rule_data.style_guide,
+        embedding=embedding
     )
     db.add(rule)
     db.commit()
@@ -102,12 +111,25 @@ def update_conference_rule(
         raise HTTPException(status_code=404, detail=f"Conference rule '{rule_id}' not found")
 
     # 部分更新: 指定されたフィールドのみ更新
+    embedding_needs_update = False
+
     if rule_data.name is not None:
         rule.name = rule_data.name
+        embedding_needs_update = True
     if rule_data.format_rules is not None:
         rule.format_rules = rule_data.format_rules
+        embedding_needs_update = True
     if rule_data.style_guide is not None:
         rule.style_guide = rule_data.style_guide
+        embedding_needs_update = True
+
+    # Embeddingを再生成
+    if embedding_needs_update:
+        rule.embedding = generate_conference_rule_embedding(
+            name=rule.name,
+            style_guide=rule.style_guide or "",
+            format_rules=rule.format_rules
+        )
 
     db.commit()
     db.refresh(rule)

@@ -1,22 +1,27 @@
 """
 nak-base AI Inference Worker
-Phase 1-3: RAG Pipeline + Context-Aware Prompt
+Phase 1-3: 完全RAGパイプライン実装
 
-シングルプロセスで順次実行、リトライなし
-コンテキスト収集 → プロンプト組み立て → LLM呼び出し
+機能:
+- Embedding生成（Ollama API / Mockモード対応）
+- チャンクのベクトル保存
+- コサイン類似度によるセマンティック検索
+- コンテキスト収集 → プロンプト組み立て → LLM呼び出し
 """
 import redis
 import time
 import json
 import requests
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
+
+from sqlalchemy import text
 
 from .config import get_settings
 from .database import get_db_session
 from .models import (
     InferenceTask, File, Feedback, Paper, Version,
-    TaskStatus, PaperStatus, ConferenceRule
+    TaskStatus, PaperStatus, ConferenceRule, Embedding
 )
 
 settings = get_settings()
@@ -49,18 +54,199 @@ def get_redis_client():
     return redis.from_url(settings.redis_url)
 
 
+# ================== Embedding Generation (Phase 1-3 RAG) ==================
+
+def generate_embedding(text_input: str) -> List[float]:
+    """
+    テキストからベクトルを生成
+
+    Args:
+        text_input: ベクトル化するテキスト
+
+    Returns:
+        768次元のベクトル（List[float]）
+
+    Note:
+        - Mockモード: 全要素0.1のダミーベクトルを即座に返す
+        - 本番モード: Ollama /api/embeddings を呼び出す
+    """
+    # Mockモード: ダミーベクトルを返す（開発用）
+    if settings.mock_mode:
+        if settings.debug_mode:
+            print(f"【デバッグ】Mock Embedding生成: {len(text_input)}文字 -> {settings.embedding_dim}次元ダミーベクトル")
+        return [0.1] * settings.embedding_dim
+
+    # 本番モード: Ollama Embedding API を呼び出す
+    try:
+        response = requests.post(
+            f"{settings.ollama_url}/api/embeddings",
+            json={
+                "model": settings.embedding_model,
+                "prompt": text_input[:8000]  # テキスト長制限
+            },
+            timeout=60
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        embedding = result.get("embedding", [])
+        if settings.debug_mode:
+            print(f"【デバッグ】Embedding生成完了: {len(text_input)}文字 -> {len(embedding)}次元")
+
+        return embedding
+
+    except Exception as e:
+        print(f"Embedding generation failed: {e}")
+        # エラー時はダミーベクトルを返す
+        return [0.0] * settings.embedding_dim
+
+
+def save_chunk_embeddings(db, file_id: int, chunks: List[dict]) -> int:
+    """
+    パース結果のチャンクをEmbeddingテーブルに保存
+
+    Args:
+        db: DBセッション
+        file_id: ファイルID
+        chunks: Parserから返されたチャンクリスト
+
+    Returns:
+        保存したチャンク数
+    """
+    saved_count = 0
+
+    for chunk in chunks:
+        content = chunk.get("content", "")
+        if not content.strip():
+            continue
+
+        # Embedding生成
+        embedding_vector = generate_embedding(content)
+
+        # DBに保存
+        embedding_record = Embedding(
+            file_id=file_id,
+            chunk_index=chunk.get("chunk_index", saved_count),
+            section_title=chunk.get("section_title"),
+            page_number=chunk.get("page_number"),
+            line_number=chunk.get("line_number"),
+            content_chunk=content,
+            location_json=chunk.get("location_json"),
+            embedding=embedding_vector
+        )
+        db.add(embedding_record)
+        saved_count += 1
+
+    db.commit()
+    return saved_count
+
+
+# ================== Semantic Search (Phase 1-3 RAG) ==================
+
+def semantic_search_chunks(db, query_text: str, exclude_file_id: Optional[int] = None, top_k: int = 5) -> List[dict]:
+    """
+    コサイン類似度によるセマンティック検索
+
+    Args:
+        db: DBセッション
+        query_text: 検索クエリテキスト
+        exclude_file_id: 除外するファイルID（現在の論文を除外）
+        top_k: 取得する上位件数
+
+    Returns:
+        類似チャンクのリスト [{"content": str, "section": str, "similarity": float}, ...]
+    """
+    # クエリのベクトルを生成
+    query_embedding = generate_embedding(query_text)
+
+    # pgvector のコサイン類似度検索
+    # <=> はコサイン距離（1 - 類似度）なので、小さいほど類似
+    query = text("""
+        SELECT
+            e.content_chunk,
+            e.section_title,
+            e.page_number,
+            f.original_filename,
+            p.title as paper_title,
+            1 - (e.embedding <=> :query_vector) as similarity
+        FROM embeddings e
+        JOIN files f ON e.file_id = f.file_id
+        JOIN versions v ON f.version_id = v.version_id
+        JOIN papers p ON v.paper_id = p.paper_id
+        WHERE e.embedding IS NOT NULL
+        AND (:exclude_file_id IS NULL OR e.file_id != :exclude_file_id)
+        ORDER BY e.embedding <=> :query_vector
+        LIMIT :top_k
+    """)
+
+    results = db.execute(query, {
+        "query_vector": str(query_embedding),
+        "exclude_file_id": exclude_file_id,
+        "top_k": top_k
+    }).fetchall()
+
+    return [
+        {
+            "content": row[0],
+            "section": row[1],
+            "page_number": row[2],
+            "filename": row[3],
+            "paper_title": row[4],
+            "similarity": float(row[5]) if row[5] else 0.0
+        }
+        for row in results
+    ]
+
+
+def semantic_search_conference_rules(db, query_text: str, top_k: int = 3) -> List[dict]:
+    """
+    学会ルールのセマンティック検索
+
+    Args:
+        db: DBセッション
+        query_text: 検索クエリテキスト
+        top_k: 取得する上位件数
+
+    Returns:
+        類似ルールのリスト [{"rule_id": str, "name": str, "style_guide": str, "similarity": float}, ...]
+    """
+    query_embedding = generate_embedding(query_text)
+
+    query = text("""
+        SELECT
+            rule_id,
+            name,
+            style_guide,
+            format_rules,
+            1 - (embedding <=> :query_vector) as similarity
+        FROM conference_rules
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> :query_vector
+        LIMIT :top_k
+    """)
+
+    results = db.execute(query, {
+        "query_vector": str(query_embedding),
+        "top_k": top_k
+    }).fetchall()
+
+    return [
+        {
+            "rule_id": row[0],
+            "name": row[1],
+            "style_guide": row[2],
+            "format_rules": row[3],
+            "similarity": float(row[4]) if row[4] else 0.0
+        }
+        for row in results
+    ]
+
+
 # ================== Context Gathering (Phase 1-3) ==================
 
 def get_conference_context(db, conference_rule_id: Optional[str]) -> dict:
     """
     学会ルールのコンテキストを取得
-
-    Returns:
-        {
-            "name": "学会名",
-            "format_rules": {...},
-            "style_guide": "..."
-        }
     """
     if not conference_rule_id:
         return {}
@@ -82,19 +268,10 @@ def get_conference_context(db, conference_rule_id: Optional[str]) -> dict:
 def get_previous_feedback_context(db, paper: Paper) -> dict:
     """
     前回提出のフィードバックを取得（再提出の場合）
-
-    Returns:
-        {
-            "parent_title": "前回の論文タイトル",
-            "summary": "前回のフィードバック要約",
-            "suggestions": ["改善提案1", ...],
-            "typos": ["誤字1", ...]
-        }
     """
     if not paper.parent_paper_id:
         return {}
 
-    # 親論文を取得
     parent_paper = db.query(Paper).filter(
         Paper.paper_id == paper.parent_paper_id
     ).first()
@@ -102,7 +279,6 @@ def get_previous_feedback_context(db, paper: Paper) -> dict:
     if not parent_paper:
         return {}
 
-    # 親論文の最新バージョンのフィードバックを取得
     parent_version = db.query(Version).filter(
         Version.paper_id == parent_paper.paper_id
     ).order_by(Version.version_number.desc()).first()
@@ -125,23 +301,55 @@ def get_previous_feedback_context(db, paper: Paper) -> dict:
     }
 
 
+def get_rag_context(db, paper_text: str, current_file_id: Optional[int] = None) -> dict:
+    """
+    RAGによる関連コンテキストの検索
+
+    Args:
+        db: DBセッション
+        paper_text: 現在の論文テキスト（クエリとして使用）
+        current_file_id: 除外するファイルID
+
+    Returns:
+        {
+            "related_chunks": [...],  # 関連する過去論文のチャンク
+            "related_rules": [...]    # 関連する学会ルール
+        }
+    """
+    # 論文の先頭部分（概要など）をクエリとして使用
+    query_text = paper_text[:2000]
+
+    # 関連チャンク検索
+    related_chunks = semantic_search_chunks(
+        db,
+        query_text,
+        exclude_file_id=current_file_id,
+        top_k=settings.rag_top_k
+    )
+
+    # 関連学会ルール検索
+    related_rules = semantic_search_conference_rules(
+        db,
+        query_text,
+        top_k=3
+    )
+
+    return {
+        "related_chunks": related_chunks,
+        "related_rules": related_rules
+    }
+
+
 # ================== Prompt Builder (Phase 1-3) ==================
 
 def build_analysis_prompt(
     paper_text: str,
     conference_context: dict,
-    previous_feedback: dict
+    previous_feedback: dict,
+    rag_context: dict
 ) -> str:
     """
     コンテキストを含む分析プロンプトを組み立て
-
-    Args:
-        paper_text: 解析済み論文テキスト
-        conference_context: 学会ルールコンテキスト
-        previous_feedback: 前回フィードバックコンテキスト
-
-    Returns:
-        組み立てられたプロンプト文字列
     """
     sections = []
 
@@ -167,8 +375,18 @@ def build_analysis_prompt(
             sections.append("")
             sections.append("### スタイルガイド")
             sections.append(style_guide)
-
         sections.append("")
+
+    # RAG: 関連する学会ルール（セマンティック検索結果）
+    if rag_context.get("related_rules"):
+        sections.append("=" * 50)
+        sections.append("## 参考: 関連する学会ガイドライン（類似度検索）")
+        for rule in rag_context["related_rules"][:2]:  # 上位2件
+            if rule.get("similarity", 0) > 0.3:  # 類似度閾値
+                sections.append(f"### {rule['name']} (類似度: {rule['similarity']:.2f})")
+                if rule.get("style_guide"):
+                    sections.append(rule["style_guide"][:500] + "...")
+                sections.append("")
 
     # 前回フィードバックセクション（あれば）
     if previous_feedback:
@@ -190,6 +408,18 @@ def build_analysis_prompt(
         sections.append("")
         sections.append("※ 上記の前回フィードバックを踏まえ、改善されている点と残っている課題を明確にしてください。")
         sections.append("")
+
+    # RAG: 関連する過去論文のチャンク
+    if rag_context.get("related_chunks"):
+        relevant_chunks = [c for c in rag_context["related_chunks"] if c.get("similarity", 0) > 0.5]
+        if relevant_chunks:
+            sections.append("=" * 50)
+            sections.append("## 参考: 関連する過去のフィードバック（類似度検索）")
+            for chunk in relevant_chunks[:3]:  # 上位3件
+                sections.append(f"### 論文: {chunk.get('paper_title', '不明')} (類似度: {chunk['similarity']:.2f})")
+                sections.append(f"セクション: {chunk.get('section', '不明')}")
+                sections.append(chunk["content"][:300] + "...")
+                sections.append("")
 
     # 分析依頼
     sections.append("=" * 50)
@@ -227,18 +457,15 @@ def build_analysis_prompt(
 def call_parser(file_path: str) -> dict:
     """
     Parserサービスを呼び出してテキスト抽出
-    Phase 1-2: 新形式（content, meta, pages, chunks）に対応
     """
     response = requests.post(
         f"{settings.parser_url}/parse",
         json={"file_path": file_path},
-        timeout=120  # ZIP/TeX処理は時間がかかる場合がある
+        timeout=120
     )
     response.raise_for_status()
     result = response.json()
 
-    # 新形式: content フィールドを使用
-    # 旧形式（legacy）との互換性: text フィールドもチェック
     if "content" in result:
         return {
             "text": result["content"],
@@ -247,7 +474,6 @@ def call_parser(file_path: str) -> dict:
             "chunks": result.get("chunks", [])
         }
     elif "text" in result:
-        # Legacy形式
         return {
             "text": result["text"],
             "meta": {},
@@ -261,13 +487,6 @@ def call_parser(file_path: str) -> dict:
 def call_ollama(prompt: str, is_mock_extended: bool = False) -> dict:
     """
     Ollamaを呼び出してテキスト分析
-
-    Args:
-        prompt: 組み立て済みプロンプト
-        is_mock_extended: 拡張MOCKモード（プロンプトを返す）
-
-    Returns:
-        分析結果のdict
     """
     # 拡張MOCKモード: プロンプト自体を返す（デバッグ用）
     if settings.mock_mode and is_mock_extended:
@@ -306,7 +525,7 @@ def call_ollama(prompt: str, is_mock_extended: bool = False) -> dict:
             "prompt": prompt,
             "stream": False
         },
-        timeout=300  # 5分タイムアウト
+        timeout=300
     )
     response.raise_for_status()
 
@@ -338,10 +557,7 @@ def call_ollama(prompt: str, is_mock_extended: bool = False) -> dict:
 # ================== Task Processing ==================
 
 def process_diagnosis_task(task_data: dict):
-    """
-    Process SYSTEM_DIAGNOSIS task (Debug mode only)
-    Dynamically imports the diagnostic module from /app/tests/
-    """
+    """Process SYSTEM_DIAGNOSIS task (Debug mode only)"""
     print("=" * 50)
     print(" SYSTEM_DIAGNOSIS task received")
     print("=" * 50)
@@ -361,14 +577,8 @@ def process_diagnosis_task(task_data: dict):
         else:
             print("ERROR: Could not load worker_check module")
             return None
-
     except FileNotFoundError:
         print("WARNING: /app/tests/worker_check.py not found")
-        print("This is expected in production mode (tests not mounted)")
-        return None
-    except ImportError as e:
-        print(f"WARNING: Could not import worker_check: {e}")
-        print("This is expected in production mode")
         return None
     except Exception as e:
         print(f"ERROR in diagnosis task: {e}")
@@ -377,17 +587,17 @@ def process_diagnosis_task(task_data: dict):
 
 def process_task(task_id: int, task_data: Optional[dict] = None):
     """
-    タスクを処理（Phase 1-3: RAG Pipeline対応版）
+    タスクを処理（Phase 1-3: 完全RAGパイプライン）
 
     フロー:
-    1. InferenceTask を取得
-    2. Version 経由で File（cache_path）を取得
-    3. コンテキスト収集（学会ルール、前回フィードバック）
-    4. Parser でテキスト抽出
+    1. InferenceTask / Version / File を取得
+    2. Parser でテキスト抽出
+    3. チャンクのEmbedding生成・保存
+    4. セマンティック検索でコンテキスト収集
     5. プロンプト組み立て
     6. Ollama で分析
     7. Feedback に結果を保存
-    8. Paper/InferenceTask のステータスを更新
+    8. ステータス更新
     """
     if settings.debug_mode:
         print(f"【デバッグ】タスク処理開始: Task ID={task_id}")
@@ -403,7 +613,6 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
             print(f"Task {task_id} not found")
             return
 
-        # 2. Version と File を取得してファイルパスを特定
         version = task.version
         if not version:
             print(f"Version not found for task {task_id}")
@@ -435,68 +644,74 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
         file_path = primary_file.cache_path
         print(f"Processing task {task_id} for file {file_path}")
 
-        # ステータス更新: PARSING
+        # ========== PARSING Phase ==========
         task.status = TaskStatus.PARSING
         task.started_at = datetime.utcnow()
         db.commit()
         publish_notification(task_id, "PARSING", "PDF解析中 (1/4)")
 
-        # 3. コンテキスト収集（Phase 1-3）
+        if settings.debug_mode:
+            print(f"【デバッグ】Parserコンテナへテキスト抽出を依頼中...")
+
+        parse_result = call_parser(file_path)
+        parsed_text = parse_result["text"]
+        chunks = parse_result.get("chunks", [])
+
+        if settings.debug_mode:
+            print(f"【デバッグ】Parser完了: {len(parsed_text)}文字, {len(chunks)}チャンク")
+
+        # ========== RAG Phase: Embedding & Search ==========
+        task.status = TaskStatus.RAG
+        db.commit()
+        publish_notification(task_id, "RAG", "Embedding生成・検索中 (2/4)")
+
+        # チャンクがある場合はEmbedding生成・保存
+        if chunks:
+            if settings.debug_mode:
+                print(f"【デバッグ】Embedding生成開始: {len(chunks)}チャンク")
+            saved_count = save_chunk_embeddings(db, primary_file.file_id, chunks)
+            if settings.debug_mode:
+                print(f"【デバッグ】Embedding保存完了: {saved_count}件")
+        else:
+            # チャンクがない場合は論文全体を1チャンクとして保存
+            if settings.debug_mode:
+                print(f"【デバッグ】チャンクなし。論文全体を1チャンクとして処理")
+            chunks = [{"content": parsed_text[:5000], "chunk_index": 0}]
+            save_chunk_embeddings(db, primary_file.file_id, chunks)
+
+        # コンテキスト収集
         if settings.debug_mode:
             print(f"【デバッグ】コンテキスト収集開始...")
 
-        # 学会ルールコンテキスト
+        # 学会ルールコンテキスト（ID指定）
         conference_context = get_conference_context(db, task.conference_rule_id)
-        if settings.debug_mode and conference_context:
-            print(f"【デバッグ】学会ルール取得: {conference_context.get('name', 'N/A')}")
 
         # 前回フィードバックコンテキスト
         previous_feedback = get_previous_feedback_context(db, paper) if paper else {}
-        if settings.debug_mode and previous_feedback:
-            print(f"【デバッグ】前回フィードバック取得: {previous_feedback.get('parent_title', 'N/A')}")
 
-        # 4. Parserを呼び出してテキスト抽出
-        if settings.debug_mode:
-            print(f"【デバッグ】Parserコンテナへテキスト抽出を依頼中... (Path: {file_path})")
-        print("Calling Parser service...")
-        parse_result = call_parser(file_path)
-        parsed_text = parse_result["text"]
-        parse_meta = parse_result.get("meta", {})
-        if settings.debug_mode:
-            print(f"【デバッグ】Parserより受領。抽出文字数: {len(parsed_text)}文字")
-            if parse_meta:
-                print(f"【デバッグ】ファイル種別: {parse_meta.get('file_type', 'unknown')}, ページ数: {parse_meta.get('num_pages', 0)}")
-        print(f"Parsed text length: {len(parsed_text)}")
+        # RAGコンテキスト（セマンティック検索）
+        rag_context = get_rag_context(db, parsed_text, current_file_id=primary_file.file_id)
 
-        # ステータス更新: RAG (コンテキスト処理中)
-        task.status = TaskStatus.RAG
+        if settings.debug_mode:
+            print(f"【デバッグ】RAGコンテキスト: 関連チャンク{len(rag_context.get('related_chunks', []))}件, 関連ルール{len(rag_context.get('related_rules', []))}件")
+
+        # ========== LLM Phase ==========
+        task.status = TaskStatus.LLM
         db.commit()
-        publish_notification(task_id, "RAG", "コンテキスト処理中 (2/4)")
+        publish_notification(task_id, "LLM", "AI分析中 (3/4)")
 
-        # 5. プロンプト組み立て（Phase 1-3）
-        if settings.debug_mode:
-            print(f"【デバッグ】プロンプト組み立て中...")
-
+        # プロンプト組み立て
         prompt = build_analysis_prompt(
             paper_text=parsed_text,
             conference_context=conference_context,
-            previous_feedback=previous_feedback
+            previous_feedback=previous_feedback,
+            rag_context=rag_context
         )
 
         if settings.debug_mode:
             print(f"【デバッグ】プロンプト長: {len(prompt)}文字")
 
-        # ステータス更新: LLM
-        task.status = TaskStatus.LLM
-        db.commit()
-        publish_notification(task_id, "LLM", "AI分析中 (3/4)")
-
-        # 6. Ollamaを呼び出して分析
-        if settings.debug_mode:
-            print(f"【デバッグ】AI推論(Ollama)を開始します...")
-        print("Calling Ollama for analysis...")
-
-        # 拡張MOCKモード判定（デバッグモード + タスクデータにdebug_promptフラグ）
+        # 拡張MOCKモード判定
         is_mock_extended = (
             settings.mock_mode and
             settings.debug_mode and
@@ -504,36 +719,40 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
             task_data.get("debug_prompt", False)
         )
 
+        print("Calling Ollama for analysis...")
         result = call_ollama(prompt, is_mock_extended=is_mock_extended)
-        if settings.debug_mode:
-            print(f"【デバッグ】AI推論完了。結果をDBに書き込みます。")
         print("Ollama analysis complete")
 
-        # 7. Feedback に結果を保存
+        # ========== Save Feedback ==========
         comments = {
             "typos": result.get("typos", []),
             "suggestions": result.get("suggestions", [])
         }
 
-        # 前回からの改善点があれば追加
         if "improvements_from_previous" in result:
             comments["improvements_from_previous"] = result["improvements_from_previous"]
 
-        # 拡張MOCKモードの場合、プロンプトデバッグ情報を追加
         if "_debug_prompt" in result:
             comments["_debug_prompt"] = result["_debug_prompt"]
             comments["_debug_prompt_length"] = result["_debug_prompt_length"]
 
+        # RAG情報を保存（デバッグ用）
+        comments["_rag_stats"] = {
+            "related_chunks_count": len(rag_context.get("related_chunks", [])),
+            "related_rules_count": len(rag_context.get("related_rules", [])),
+            "embeddings_saved": len(chunks)
+        }
+
         feedback = Feedback(
             version_id=version.version_id,
             task_id=task.task_id,
-            score_json=None,  # 将来的にスコア計算を実装
+            score_json=None,
             comments_json=comments,
             overall_summary=result.get("summary", "")
         )
         db.add(feedback)
 
-        # 8. ステータス更新: COMPLETED
+        # ========== Complete ==========
         task.status = TaskStatus.COMPLETED
         task.completed_at = datetime.utcnow()
 
@@ -546,6 +765,8 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
 
     except Exception as e:
         print(f"Error processing task {task_id}: {e}")
+        import traceback
+        traceback.print_exc()
         db.rollback()
 
         try:
@@ -568,14 +789,7 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
 
 
 def parse_task_data(data: bytes) -> tuple:
-    """
-    Parse task data from Redis.
-    Returns: (task_type, task_data)
-    - For regular tasks: ("REGULAR", {"task_id": int, "job_type": str, ...})
-    - For reference tasks: ("REFERENCE_ONLY", {"task_id": int, "job_type": str})
-    - For diagnosis tasks: ("SYSTEM_DIAGNOSIS", task_data as dict)
-    - Legacy format (task_id only): ("REGULAR", {"task_id": int, "job_type": "ANALYSIS"})
-    """
+    """Parse task data from Redis."""
     try:
         decoded = data.decode("utf-8")
 
@@ -604,11 +818,14 @@ def main():
     """Main worker loop."""
     print("=" * 50)
     print(" NAK-BASE AI INFERENCE WORKER")
-    print(" Phase 1-3: RAG Pipeline + Context-Aware Prompt")
+    print(" Phase 1-3: Full RAG Pipeline")
     print("=" * 50)
     print(f"Redis: {settings.redis_url}")
     print(f"Ollama: {settings.ollama_url}")
     print(f"Parser: {settings.parser_url}")
+    print(f"Embedding Model: {settings.embedding_model}")
+    print(f"Embedding Dim: {settings.embedding_dim}")
+    print(f"RAG Top-K: {settings.rag_top_k}")
     print(f"Debug Mode: {settings.debug_mode}")
     print(f"Mock Mode: {settings.mock_mode}")
 

@@ -1,6 +1,6 @@
 """
 nak-base Worker用データモデル
-Backend側と完全に同期（Phase 1-1対応）
+Backend側と完全に同期（Phase 1-3対応）
 
 注意: このファイルは backend/app/models.py と同じ構造を維持すること
 """
@@ -11,6 +11,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
 import enum
 
 from .database import Base
@@ -215,7 +216,9 @@ class InferenceTask(Base):
 class Embedding(Base):
     """
     8. embeddings (RAG・ベクトル検索用)
-    注意: pgvector の Vector 型はWorkerでは使用しないため省略
+    pgvector を使用したセマンティック検索用データ
+
+    Phase 1-3: nomic-embed-text (768次元) を使用
     """
     __tablename__ = "embeddings"
 
@@ -227,8 +230,7 @@ class Embedding(Base):
     line_number = Column(Integer, nullable=True)
     content_chunk = Column(Text, nullable=False)
     location_json = Column(JSONB, nullable=True)
-    # embedding カラムは Vector 型だが、Workerでは直接操作しないため Text で代用
-    # 実際のDB上は Vector(1536) として存在
+    embedding = Column(Vector(768), nullable=True)  # nomic-embed-text dimension
     created_at = Column(DateTime, server_default=func.now())
 
     # Relationships
@@ -240,6 +242,7 @@ class ConferenceRule(Base):
     9. conference_rules (学会別ルール定義)
 
     Phase 1-3: プロンプトに埋め込む学会ルール
+    - embedding: スタイルガイドのベクトル表現（セマンティック検索用）
     """
     __tablename__ = "conference_rules"
 
@@ -247,6 +250,7 @@ class ConferenceRule(Base):
     name = Column(String(255), nullable=False)
     format_rules = Column(JSONB, nullable=True)
     style_guide = Column(Text, nullable=True)
+    embedding = Column(Vector(768), nullable=True)  # セマンティック検索用ベクトル
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

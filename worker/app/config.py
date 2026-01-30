@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     mock_mode: bool = True  # デフォルトをTrue(デモモード)にする
     debug_mode: bool = False
 
+    # Embedding設定 (Phase 1-3 RAG)
+    embedding_model: str = "nomic-embed-text"  # Ollamaで使用するEmbeddingモデル
+    embedding_dim: int = 768  # nomic-embed-textは768次元
+    rag_top_k: int = 5  # セマンティック検索で取得するチャンク数
+
     class Config:
         env_file = ".env"
 

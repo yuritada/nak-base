@@ -225,6 +225,8 @@ class Embedding(Base):
     """
     8. embeddings (RAG・ベクトル検索用)
     pgvector を使用した検索用データ
+
+    Phase 1-3: nomic-embed-text (768次元) を使用
     """
     __tablename__ = "embeddings"
 
@@ -236,7 +238,7 @@ class Embedding(Base):
     line_number = Column(Integer, nullable=True)
     content_chunk = Column(Text, nullable=False)
     location_json = Column(JSONB, nullable=True)  # {"page": 1, "bbox": [x0, y0, x1, y1]}
-    embedding = Column(Vector(1536), nullable=True)  # OpenAI/Gemma embedding dimension
+    embedding = Column(Vector(768), nullable=True)  # nomic-embed-text dimension
     created_at = Column(DateTime, server_default=func.now())
 
     # Relationships
@@ -250,6 +252,7 @@ class ConferenceRule(Base):
     Phase 1-3: プロンプトに埋め込む学会ルール
     - format_rules: JSON形式のフォーマット規定（ページ数、フォントサイズ等）
     - style_guide: テキスト形式のスタイルガイド（プロンプトに直接埋め込み）
+    - embedding: スタイルガイドのベクトル表現（セマンティック検索用）
     """
     __tablename__ = "conference_rules"
 
@@ -257,6 +260,7 @@ class ConferenceRule(Base):
     name = Column(String(255), nullable=False)
     format_rules = Column(JSONB, nullable=True)
     style_guide = Column(Text, nullable=True)
+    embedding = Column(Vector(768), nullable=True)  # セマンティック検索用ベクトル
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
