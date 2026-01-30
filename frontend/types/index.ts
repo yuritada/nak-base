@@ -99,6 +99,9 @@ export interface PaperListItem extends Paper {
   latest_task_id: number | null;
   latest_task_status: TaskStatusEnum | null;
   phase: string | null;
+  // バージョン履歴情報
+  total_versions: number;
+  child_paper_count: number;
 }
 
 // ================== API Response Types ==================

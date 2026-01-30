@@ -130,6 +130,17 @@ def list_papers(db: Session = Depends(get_db)):
         # 最新の子孫論文のステータスを表示に使用
         latest_paper = max(all_family_papers, key=lambda p: p.created_at) if all_family_papers else root_paper
 
+        # 全バージョン数をカウント
+        total_versions = 0
+        for family_paper in all_family_papers:
+            version_count = db.query(Version).filter(
+                Version.paper_id == family_paper.paper_id
+            ).count()
+            total_versions += version_count
+
+        # 子論文（再提出）の数をカウント
+        child_paper_count = len(all_family_papers) - 1  # ルート論文を除く
+
         item = PaperListItem(
             paper_id=root_paper.paper_id,  # ルート論文のIDを表示
             owner_id=root_paper.owner_id,
@@ -141,6 +152,8 @@ def list_papers(db: Session = Depends(get_db)):
             latest_task_id=latest_task.task_id if latest_task else None,
             latest_task_status=latest_task.status if latest_task else None,
             phase=get_task_phase_text(latest_task.status) if latest_task else None,
+            total_versions=total_versions,
+            child_paper_count=child_paper_count,
         )
         result.append(item)
 

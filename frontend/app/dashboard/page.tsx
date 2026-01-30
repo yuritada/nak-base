@@ -2,13 +2,13 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { FileText, Loader2, Plus, RefreshCw, WifiOff } from 'lucide-react';
+import { FileText, Loader2, Plus, RefreshCw, WifiOff, GitBranch } from 'lucide-react';
 import { getPapers } from '@/lib/api';
 import { useSSE } from '@/hooks';
-import type { Paper, TaskStatusEnum, SSENotificationEvent } from '@/types';
+import type { PaperListItem, TaskStatusEnum, SSENotificationEvent } from '@/types';
 import { getTaskStatusDisplay, getPaperStatusDisplay } from '@/types';
 
-interface PaperWithTaskInfo extends Paper {
+interface PaperWithTaskInfo extends PaperListItem {
   taskStatus?: TaskStatusEnum;
   taskPhase?: string;
   taskId?: number;
@@ -120,6 +120,9 @@ export default function DashboardPage() {
                   タイトル
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  バージョン
+                </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   アップロード日時
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -155,6 +158,8 @@ function PaperRow({ paper }: { paper: PaperWithTaskInfo }) {
     gray: 'bg-gray-100 text-gray-800',
   };
 
+  const hasResubmissions = paper.child_paper_count > 0;
+
   return (
     <tr className="hover:bg-gray-50">
       <td className="px-6 py-4 text-sm text-gray-900">
@@ -168,6 +173,23 @@ function PaperRow({ paper }: { paper: PaperWithTaskInfo }) {
         ) : (
           <span className="text-gray-500">{paper.title}</span>
         )}
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap text-sm">
+        <div className="flex items-center gap-1">
+          {hasResubmissions ? (
+            <>
+              <GitBranch className="w-4 h-4 text-purple-500" />
+              <span className="text-purple-600 font-medium">
+                v{paper.total_versions}
+              </span>
+              <span className="text-gray-400 text-xs">
+                ({paper.child_paper_count}回再提出)
+              </span>
+            </>
+          ) : (
+            <span className="text-gray-500">v1</span>
+          )}
+        </div>
       </td>
       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
         {paper.created_at ? new Date(paper.created_at).toLocaleString('ja-JP') : '-'}

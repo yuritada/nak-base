@@ -3,9 +3,9 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { FileText, Loader2, ArrowLeft, AlertTriangle } from 'lucide-react';
-import { getPaper, getFeedback } from '@/lib/api';
-import type { PaperDetail, Feedback } from '@/types';
+import { FileText, Loader2, ArrowLeft, AlertTriangle, GitBranch, Clock } from 'lucide-react';
+import { getPaper, getFeedback, getVersions } from '@/lib/api';
+import type { PaperDetail, Feedback, Version } from '@/types';
 import { getPaperStatusDisplay } from '@/types';
 
 export default function PaperDetailPage() {
@@ -14,6 +14,7 @@ export default function PaperDetailPage() {
 
   const [paper, setPaper] = useState<PaperDetail | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [allVersions, setAllVersions] = useState<Version[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -24,8 +25,13 @@ export default function PaperDetailPage() {
         const paperData = await getPaper(paperId);
         setPaper(paperData);
 
-        if (paperData.versions && paperData.versions.length > 0) {
-          const latestVersion = paperData.versions[paperData.versions.length - 1];
+        // 全バージョン履歴を取得（親子関係を含む）
+        const versionsData = await getVersions(paperId);
+        setAllVersions(versionsData);
+
+        // 最新バージョンのフィードバックを取得
+        if (versionsData.length > 0) {
+          const latestVersion = versionsData[0]; // 降順でソート済み
           const feedbackData = await getFeedback(latestVersion.version_id);
           setFeedback(feedbackData);
         }
@@ -84,10 +90,53 @@ export default function PaperDetailPage() {
           アップロード日時:{' '}
           {paper.created_at ? new Date(paper.created_at).toLocaleString('ja-JP') : '-'}
         </p>
-        {paper.versions && paper.versions.length > 1 && (
-          <p className="text-gray-500 text-sm mt-1">バージョン: {paper.versions.length}件</p>
+        {allVersions.length > 1 && (
+          <div className="flex items-center gap-2 mt-2">
+            <GitBranch className="w-4 h-4 text-purple-500" />
+            <span className="text-purple-600 font-medium text-sm">
+              全{allVersions.length}バージョン（再提出履歴あり）
+            </span>
+          </div>
         )}
       </div>
+
+      {/* バージョン履歴セクション */}
+      {allVersions.length > 1 && (
+        <div className="bg-white rounded-lg shadow-sm border overflow-hidden mb-6">
+          <div className="px-6 py-4 border-b flex items-center">
+            <Clock className="w-5 h-5 text-purple-500 mr-3" />
+            <span className="font-medium">バージョン履歴</span>
+          </div>
+          <div className="p-4">
+            <div className="space-y-2">
+              {allVersions.map((version, index) => (
+                <div
+                  key={version.version_id}
+                  className={`flex items-center justify-between p-3 rounded-lg ${
+                    index === 0 ? 'bg-purple-50 border border-purple-200' : 'bg-gray-50'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <span className={`px-2 py-1 text-xs rounded-full ${
+                      index === 0 ? 'bg-purple-200 text-purple-800' : 'bg-gray-200 text-gray-600'
+                    }`}>
+                      v{version.version_number}
+                    </span>
+                    {index === 0 && (
+                      <span className="text-xs text-purple-600 font-medium">最新</span>
+                    )}
+                  </div>
+                  <span className="text-sm text-gray-500">
+                    {version.created_at
+                      ? new Date(version.created_at).toLocaleString('ja-JP')
+                      : '-'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
         <div className="px-6 py-4 border-b flex items-center">

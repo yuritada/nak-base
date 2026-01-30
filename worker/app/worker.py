@@ -124,11 +124,19 @@ def save_chunk_embeddings(db, file_id: int, chunks: List[dict]) -> int:
         # Embedding生成
         embedding_vector = generate_embedding(content)
 
+        # section_title の取得と切り詰め処理
+        # DB制限（VARCHAR(255)）を超える場合は切り詰める
+        raw_section_title = chunk.get("section_title")
+        if raw_section_title and len(raw_section_title) > 255:
+            section_title = raw_section_title[:250] + "..."
+        else:
+            section_title = raw_section_title
+
         # DBに保存
         embedding_record = Embedding(
             file_id=file_id,
             chunk_index=chunk.get("chunk_index", saved_count),
-            section_title=chunk.get("section_title"),
+            section_title=section_title,
             page_number=chunk.get("page_number"),
             line_number=chunk.get("line_number"),
             content_chunk=content,

@@ -220,6 +220,9 @@ class PaperListItem(BaseModel):
     latest_task_id: Optional[int] = None
     latest_task_status: Optional[TaskStatusEnum] = None
     phase: Optional[str] = None  # フロントエンド表示用のフェーズ文字列
+    # バージョン履歴情報
+    total_versions: int = 1  # 親子論文を含む全バージョン数
+    child_paper_count: int = 0  # 再提出（子論文）の数
 
     class Config:
         from_attributes = True
