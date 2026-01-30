@@ -12,6 +12,7 @@ import redis
 import time
 import json
 import requests
+import difflib
 from datetime import datetime
 from typing import Optional, List
 
@@ -301,6 +302,135 @@ def get_previous_feedback_context(db, paper: Paper) -> dict:
     }
 
 
+def get_parent_paper_text(db, paper: Paper) -> str:
+    """
+    前回（親）論文の全文テキストを取得
+
+    再提出論文の場合、親論文のメインファイルをパースしてテキストを抽出する。
+    これにより、前回と今回のテキスト差分（Diff）を算出できる。
+
+    Args:
+        db: DBセッション
+        paper: 現在の論文オブジェクト
+
+    Returns:
+        親論文のテキスト（親論文がない場合は空文字）
+    """
+    # 親論文がない場合は空文字を返す
+    if not paper.parent_paper_id:
+        return ""
+
+    try:
+        # 親論文を取得
+        parent_paper = db.query(Paper).filter(
+            Paper.paper_id == paper.parent_paper_id
+        ).first()
+
+        if not parent_paper:
+            if settings.debug_mode:
+                print(f"【デバッグ】親論文が見つかりません: parent_paper_id={paper.parent_paper_id}")
+            return ""
+
+        # 親論文の最新バージョンを取得
+        parent_version = db.query(Version).filter(
+            Version.paper_id == parent_paper.paper_id
+        ).order_by(Version.version_number.desc()).first()
+
+        if not parent_version:
+            if settings.debug_mode:
+                print(f"【デバッグ】親論文のバージョンが見つかりません")
+            return ""
+
+        # プライマリファイルを取得
+        parent_file = db.query(File).filter(
+            File.version_id == parent_version.version_id,
+            File.is_primary == True
+        ).first()
+
+        if not parent_file:
+            # プライマリがなければ最初のファイルを使用
+            parent_file = db.query(File).filter(
+                File.version_id == parent_version.version_id
+            ).first()
+
+        if not parent_file or not parent_file.cache_path:
+            if settings.debug_mode:
+                print(f"【デバッグ】親論文のファイルが見つかりません")
+            return ""
+
+        # Parserを呼び出してテキスト抽出
+        if settings.debug_mode:
+            print(f"【デバッグ】親論文をパース中: {parent_file.cache_path}")
+
+        parse_result = call_parser(parent_file.cache_path)
+        parent_text = parse_result.get("text", "")
+
+        if settings.debug_mode:
+            print(f"【デバッグ】親論文テキスト取得完了: {len(parent_text)}文字")
+
+        return parent_text
+
+    except Exception as e:
+        # エラーが発生してもタスクは継続（Diffはあくまで参考情報）
+        print(f"Warning: Failed to get parent paper text: {e}")
+        return ""
+
+
+def generate_diff_summary(old_text: str, new_text: str, max_length: int = 3000) -> str:
+    """
+    2つのテキスト間の差分サマリーを生成
+
+    Python標準の difflib を使用して unified diff を生成し、
+    変更箇所（追加・削除）のみを抽出する。
+
+    Args:
+        old_text: 前回のテキスト
+        new_text: 今回のテキスト
+        max_length: 出力の最大文字数（トークン制限対策）
+
+    Returns:
+        差分サマリー文字列（変更がない場合は空文字）
+    """
+    if not old_text or not new_text:
+        return ""
+
+    # テキストを行単位で分割
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+
+    # unified_diff で差分を生成
+    diff = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile='前回の論文',
+        tofile='今回の論文',
+        lineterm=''
+    )
+
+    # 変更行（+/-）のみを抽出
+    # ヘッダー行（---、+++、@@）は含める
+    diff_lines = []
+    for line in diff:
+        # ヘッダー行とコンテキスト変更行のみ抽出
+        if line.startswith('---') or line.startswith('+++') or line.startswith('@@'):
+            diff_lines.append(line)
+        elif line.startswith('+') or line.startswith('-'):
+            # 追加・削除行
+            diff_lines.append(line)
+        # スペースで始まる行（変更なし）は除外
+
+    if not diff_lines:
+        return ""
+
+    diff_text = '\n'.join(diff_lines)
+
+    # トークン制限対策: 長すぎる場合は切り捨て
+    if len(diff_text) > max_length:
+        diff_text = diff_text[:max_length] + "\n\n... (以下省略: 差分が長すぎるため切り捨て)"
+
+    return diff_text
+
+
 def get_rag_context(db, paper_text: str, current_file_id: Optional[int] = None) -> dict:
     """
     RAGによる関連コンテキストの検索
@@ -346,10 +476,18 @@ def build_analysis_prompt(
     paper_text: str,
     conference_context: dict,
     previous_feedback: dict,
-    rag_context: dict
+    rag_context: dict,
+    diff_text: str = ""
 ) -> str:
     """
     コンテキストを含む分析プロンプトを組み立て
+
+    Args:
+        paper_text: 論文テキスト
+        conference_context: 学会ルールコンテキスト
+        previous_feedback: 前回フィードバック
+        rag_context: RAG検索結果
+        diff_text: 前回論文との差分テキスト（再提出の場合）
     """
     sections = []
 
@@ -407,6 +545,20 @@ def build_analysis_prompt(
 
         sections.append("")
         sections.append("※ 上記の前回フィードバックを踏まえ、改善されている点と残っている課題を明確にしてください。")
+        sections.append("")
+
+    # 前回論文との差分セクション（再提出の場合）
+    if diff_text:
+        sections.append("=" * 50)
+        sections.append("## 前回論文との差分（Unified Diff）")
+        sections.append("")
+        sections.append("以下は前回提出論文との差分です。")
+        sections.append("「-」で始まる行は削除された内容、「+」で始まる行は追加された内容を示します。")
+        sections.append("この差分を参考に、どのような修正が行われたかを評価してください。")
+        sections.append("")
+        sections.append("```diff")
+        sections.append(diff_text)
+        sections.append("```")
         sections.append("")
 
     # RAG: 関連する過去論文のチャンク
@@ -487,34 +639,37 @@ def call_parser(file_path: str) -> dict:
 def call_ollama(prompt: str, is_mock_extended: bool = False) -> dict:
     """
     Ollamaを呼び出してテキスト分析
-    """
-    # 拡張MOCKモード: プロンプト自体を返す（デバッグ用）
-    if settings.mock_mode and is_mock_extended:
-        print("Extended Mock mode: Returning assembled prompt...")
-        time.sleep(1)
-        return {
-            "summary": "[MOCK MODE] プロンプト確認モード",
-            "typos": [],
-            "suggestions": ["以下に組み立てられたプロンプトを表示しています。"],
-            "_debug_prompt": prompt,
-            "_debug_prompt_length": len(prompt)
-        }
 
-    # 通常MOCKモード: デモデータを返す
+    Mockモード時はプロンプト内容をそのまま返す（デバッグ用）
+    これにより、RAGがどのようなコンテキストを検索・注入したかを確認できる
+    """
+    # Mockモード: プロンプト内容をそのまま返す
+    # Phase 1-3改善: 固定デモデータではなく、実際のプロンプトを返すことで
+    # RAGの動作確認とデバッグを容易にする
     if settings.mock_mode:
-        print("Mock mode: Returning demo data...")
-        time.sleep(2)
+        print("Mock mode: Returning prompt content for debugging...")
+        time.sleep(1)
+
+        # プロンプトを適切な長さに分割してsuggestionsに格納
+        # フロントエンドの「改善提案」欄でプロンプト内容を確認できるようにする
+        prompt_lines = prompt.split('\n')
+        prompt_chunks = []
+
+        # 長いプロンプトを見やすく分割（空行で区切られたセクション単位）
+        current_chunk = []
+        for line in prompt_lines:
+            current_chunk.append(line)
+            if line.strip() == '' and len(current_chunk) > 5:
+                prompt_chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+        if current_chunk:
+            prompt_chunks.append('\n'.join(current_chunk))
+
         return {
-            "summary": "本論文は、AIを活用した論文指導システムの構築について述べています。特に、マルチエージェントを用いたフィードバック層の導入により、教員の負担軽減と指導の質の向上を提案しています。",
-            "typos": [
-                "1ページ目：『システムアーキテクチャ』→『システムアーキテクチャ』(スペルミス)",
-                "3ページ目：『即時フィードバック』が『即時フイードバック』になっています"
-            ],
-            "suggestions": [
-                "先行研究の比較表を追加すると、提案手法の優位性がより明確になります。",
-                "図3の文字サイズが小さいため、拡大を推奨します。",
-                "結論部分で、今後の展望についてもう少し詳しく触れてください。"
-            ]
+            "summary": f"【Mock: プロンプト確認モード】\n以下はLLMに送信される予定だったプロンプトの内容です。\nプロンプト全長: {len(prompt)}文字",
+            "typos": [],
+            "suggestions": prompt_chunks if prompt_chunks else [prompt],
+            "improvements_from_previous": []
         }
 
     # 実際のOllama呼び出し
@@ -695,6 +850,21 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
         if settings.debug_mode:
             print(f"【デバッグ】RAGコンテキスト: 関連チャンク{len(rag_context.get('related_chunks', []))}件, 関連ルール{len(rag_context.get('related_rules', []))}件")
 
+        # 前回論文との差分を生成（再提出の場合）
+        diff_text = ""
+        if paper and paper.parent_paper_id:
+            if settings.debug_mode:
+                print(f"【デバッグ】差分生成開始: 親論文ID={paper.parent_paper_id}")
+
+            parent_text = get_parent_paper_text(db, paper)
+            if parent_text:
+                diff_text = generate_diff_summary(parent_text, parsed_text)
+                if settings.debug_mode:
+                    print(f"【デバッグ】差分生成完了: {len(diff_text)}文字")
+            else:
+                if settings.debug_mode:
+                    print(f"【デバッグ】親論文のテキスト取得失敗、差分はスキップ")
+
         # ========== LLM Phase ==========
         task.status = TaskStatus.LLM
         db.commit()
@@ -705,7 +875,8 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
             paper_text=parsed_text,
             conference_context=conference_context,
             previous_feedback=previous_feedback,
-            rag_context=rag_context
+            rag_context=rag_context,
+            diff_text=diff_text
         )
 
         if settings.debug_mode:
@@ -740,7 +911,9 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
         comments["_rag_stats"] = {
             "related_chunks_count": len(rag_context.get("related_chunks", [])),
             "related_rules_count": len(rag_context.get("related_rules", [])),
-            "embeddings_saved": len(chunks)
+            "embeddings_saved": len(chunks),
+            "diff_length": len(diff_text) if diff_text else 0,
+            "has_parent_paper": bool(paper and paper.parent_paper_id)
         }
 
         feedback = Feedback(
