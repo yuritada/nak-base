@@ -2,7 +2,7 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'nak-base - 論文フィードバックシステム MVP',
+  title: 'nak-base - 論文フィードバックシステム v1-3',
   description: 'PDFを投げたらAIが感想を返す',
 }
 
@@ -22,7 +22,7 @@ export default function RootLayout({
                   nak-base
                 </a>
                 <span className="ml-2 text-sm text-gray-500">
-                  MVP
+                  v1-3
                 </span>
               </div>
               <div className="flex items-center space-x-4">

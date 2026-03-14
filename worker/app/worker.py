@@ -13,6 +13,8 @@ import time
 import json
 import requests
 import difflib
+import os
+import uuid
 from datetime import datetime
 from typing import Optional, List
 
@@ -486,7 +488,7 @@ def build_analysis_prompt(
     previous_feedback: dict,
     rag_context: dict,
     diff_text: str = ""
-) -> str:
+) -> dict:
     """
     コンテキストを含む分析プロンプトを組み立て
 
@@ -496,15 +498,25 @@ def build_analysis_prompt(
         previous_feedback: 前回フィードバック
         rag_context: RAG検索結果
         diff_text: 前回論文との差分テキスト（再提出の場合）
+
+    Returns:
+        dict: {
+            "full_text": 結合済みプロンプト文字列,
+            "components": 構造化された構成要素（ログ保存用）
+        }
     """
     sections = []
+    components = {}
 
     # ヘッダー
-    sections.append("あなたは学術論文のレビューを行う専門家です。以下の論文を分析し、改善提案を行ってください。")
+    header = "あなたは学術論文のレビューを行う専門家です。以下の論文を分析し、改善提案を行ってください。"
+    components["header"] = header
+    sections.append(header)
     sections.append("")
 
     # 学会ルールセクション（あれば）
     if conference_context:
+        components["conference_context"] = conference_context
         sections.append("=" * 50)
         sections.append("## 対象学会・投稿規定")
         sections.append(f"学会名: {conference_context.get('name', '不明')}")
@@ -522,20 +534,30 @@ def build_analysis_prompt(
             sections.append("### スタイルガイド")
             sections.append(style_guide)
         sections.append("")
+    else:
+        components["conference_context"] = None
 
     # RAG: 関連する学会ルール（セマンティック検索結果）
+    rag_rules = []
     if rag_context.get("related_rules"):
         sections.append("=" * 50)
         sections.append("## 参考: 関連する学会ガイドライン（類似度検索）")
         for rule in rag_context["related_rules"][:2]:  # 上位2件
             if rule.get("similarity", 0) > 0.3:  # 類似度閾値
+                rag_rules.append({
+                    "name": rule.get("name"),
+                    "similarity": rule.get("similarity"),
+                    "style_guide_preview": (rule.get("style_guide") or "")[:500]
+                })
                 sections.append(f"### {rule['name']} (類似度: {rule['similarity']:.2f})")
                 if rule.get("style_guide"):
                     sections.append(rule["style_guide"][:500] + "...")
                 sections.append("")
+    components["rag_rules"] = rag_rules
 
     # 前回フィードバックセクション（あれば）
     if previous_feedback:
+        components["previous_feedback"] = previous_feedback
         sections.append("=" * 50)
         sections.append("## 前回提出時のフィードバック（参考情報）")
         sections.append(f"前回タイトル: {previous_feedback.get('parent_title', '不明')}")
@@ -554,9 +576,12 @@ def build_analysis_prompt(
         sections.append("")
         sections.append("※ 上記の前回フィードバックを踏まえ、改善されている点と残っている課題を明確にしてください。")
         sections.append("")
+    else:
+        components["previous_feedback"] = None
 
     # 前回論文との差分セクション（再提出の場合）
     if diff_text:
+        components["diff_summary"] = diff_text[:3000] + ("..." if len(diff_text) > 3000 else "")
         sections.append("=" * 50)
         sections.append("## 前回論文との差分（Unified Diff）")
         sections.append("")
@@ -568,48 +593,73 @@ def build_analysis_prompt(
         sections.append(diff_text)
         sections.append("```")
         sections.append("")
+    else:
+        components["diff_summary"] = None
 
     # RAG: 関連する過去論文のチャンク
+    rag_chunks = []
     if rag_context.get("related_chunks"):
         relevant_chunks = [c for c in rag_context["related_chunks"] if c.get("similarity", 0) > 0.5]
         if relevant_chunks:
             sections.append("=" * 50)
             sections.append("## 参考: 関連する過去のフィードバック（類似度検索）")
             for chunk in relevant_chunks[:3]:  # 上位3件
+                rag_chunks.append({
+                    "paper_title": chunk.get("paper_title"),
+                    "section": chunk.get("section"),
+                    "similarity": chunk.get("similarity"),
+                    "content_preview": chunk.get("content", "")[:300]
+                })
                 sections.append(f"### 論文: {chunk.get('paper_title', '不明')} (類似度: {chunk['similarity']:.2f})")
                 sections.append(f"セクション: {chunk.get('section', '不明')}")
                 sections.append(chunk["content"][:300] + "...")
                 sections.append("")
+    components["rag_chunks"] = rag_chunks
 
     # 分析依頼
+    instructions_lines = []
+    instructions_lines.append("## 分析内容")
+    instructions_lines.append("1. 要約（summary）: 200文字程度で論文の概要を説明")
+    instructions_lines.append("2. 誤字脱字（typos）: 検出された誤字脱字のリスト")
+    instructions_lines.append("3. 改善提案（suggestions）: 論文を改善するための具体的な提案")
+
+    if previous_feedback:
+        instructions_lines.append("4. 前回からの改善点（improvements_from_previous）: 前回フィードバックに対する改善状況")
+
+    instructions_lines.append("")
+    instructions_lines.append("## 出力形式（JSON）")
+    instructions_lines.append("{")
+    instructions_lines.append('  "summary": "論文の要約...",')
+    instructions_lines.append('  "typos": ["誤字1", "誤字2"],')
+    instructions_lines.append('  "suggestions": ["提案1", "提案2", "提案3"]')
+    if previous_feedback:
+        instructions_lines.append('  "improvements_from_previous": ["改善点1", "改善点2"]')
+    instructions_lines.append("}")
+
+    instructions = "\n".join(instructions_lines)
+    components["instructions"] = instructions
+
     sections.append("=" * 50)
-    sections.append("## 分析内容")
-    sections.append("1. 要約（summary）: 200文字程度で論文の概要を説明")
-    sections.append("2. 誤字脱字（typos）: 検出された誤字脱字のリスト")
-    sections.append("3. 改善提案（suggestions）: 論文を改善するための具体的な提案")
-
-    if previous_feedback:
-        sections.append("4. 前回からの改善点（improvements_from_previous）: 前回フィードバックに対する改善状況")
-
-    sections.append("")
-    sections.append("## 出力形式（JSON）")
-    sections.append("{")
-    sections.append('  "summary": "論文の要約...",')
-    sections.append('  "typos": ["誤字1", "誤字2"],')
-    sections.append('  "suggestions": ["提案1", "提案2", "提案3"]')
-    if previous_feedback:
-        sections.append('  "improvements_from_previous": ["改善点1", "改善点2"]')
-    sections.append("}")
+    sections.extend(instructions_lines)
     sections.append("")
 
     # 論文テキスト
+    paper_text_truncated = paper_text[:10000]
+    components["paper_text_preview"] = paper_text[:2000] + ("..." if len(paper_text) > 2000 else "")
+    components["paper_text_length"] = len(paper_text)
+
     sections.append("=" * 50)
     sections.append("## 論文テキスト")
-    sections.append(paper_text[:10000])  # 最初の10000文字のみ
+    sections.append(paper_text_truncated)  # 最初の10000文字のみ
     sections.append("")
     sections.append("## 回答（JSON形式）")
 
-    return "\n".join(sections)
+    full_text = "\n".join(sections)
+
+    return {
+        "full_text": full_text,
+        "components": components
+    }
 
 
 # ================== Parser & LLM Calls ==================
@@ -644,40 +694,65 @@ def call_parser(file_path: str) -> dict:
         raise ValueError("Parser response missing both 'content' and 'text' fields")
 
 
-def call_ollama(prompt: str, is_mock_extended: bool = False) -> dict:
+def call_ollama(prompt: str, prompt_components: Optional[dict] = None, is_mock_extended: bool = False) -> dict:
     """
     Ollamaを呼び出してテキスト分析
 
-    Mockモード時はプロンプト内容をそのまま返す（デバッグ用）
-    これにより、RAGがどのようなコンテキストを検索・注入したかを確認できる
+    Args:
+        prompt: LLMに送信するプロンプト文字列
+        prompt_components: プロンプトの構造化データ（Mockモード時のログ保存用）
+        is_mock_extended: 拡張Mockモードフラグ（未使用、後方互換性のため残す）
+
+    Mockモード時はリクエストJSONをログファイルに保存し、
+    安全なダミーデータを返却する
     """
-    # Mockモード: プロンプト内容をそのまま返す
-    # Phase 1-3改善: 固定デモデータではなく、実際のプロンプトを返すことで
-    # RAGの動作確認とデバッグを容易にする
+    # Mockモード: リクエストをログに保存し、ダミーレスポンスを返す
     if settings.mock_mode:
-        print("Mock mode: Returning prompt content for debugging...")
+        print("Mock mode: Saving request to log file and returning dummy response...")
         time.sleep(1)
 
-        # プロンプトを適切な長さに分割してsuggestionsに格納
-        # フロントエンドの「改善提案」欄でプロンプト内容を確認できるようにする
-        prompt_lines = prompt.split('\n')
-        prompt_chunks = []
+        # logsディレクトリが存在しない場合は作成
+        logs_dir = "logs"
+        os.makedirs(logs_dir, exist_ok=True)
 
-        # 長いプロンプトを見やすく分割（空行で区切られたセクション単位）
-        current_chunk = []
-        for line in prompt_lines:
-            current_chunk.append(line)
-            if line.strip() == '' and len(current_chunk) > 5:
-                prompt_chunks.append('\n'.join(current_chunk))
-                current_chunk = []
-        if current_chunk:
-            prompt_chunks.append('\n'.join(current_chunk))
+        # ファイル名を生成: ollama_req_{YYYYMMDD_HHMMSS}_{UUID}.json
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_id = str(uuid.uuid4())[:8]
+        filename = f"ollama_req_{timestamp}_{unique_id}.json"
+        filepath = os.path.join(logs_dir, filename)
 
+        # 保存するデータを決定
+        if prompt_components:
+            # 構造化データが渡された場合はそれを保存（解読しやすい形式）
+            log_data = {
+                "type": "structured_prompt",
+                "timestamp": timestamp,
+                "model": "gemma2:2b",
+                "prompt_length": len(prompt),
+                "components": prompt_components
+            }
+        else:
+            # 従来通りプロンプト文字列を保存
+            log_data = {
+                "type": "raw_prompt",
+                "timestamp": timestamp,
+                "model": "gemma2:2b",
+                "prompt": prompt,
+                "stream": False
+            }
+
+        # JSONファイルとして保存（日本語対応）
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(log_data, f, ensure_ascii=False, indent=2)
+
+        print(f"Mock mode: Request saved to {filepath}")
+
+        # フロントエンドがエラーを起こさない安全なダミーデータを返却
         return {
-            "summary": f"【Mock: プロンプト確認モード】\n以下はLLMに送信される予定だったプロンプトの内容です。\nプロンプト全長: {len(prompt)}文字",
-            "typos": [],
-            "suggestions": prompt_chunks if prompt_chunks else [prompt],
-            "improvements_from_previous": []
+            "summary": "【Mockモード】これはダミーの要約です。プロンプトの内容は logs フォルダ内のJSONファイルを確認してください。",
+            "typos": ["ダミー誤字1", "ダミー誤字2"],
+            "suggestions": ["これはダミーの改善提案です。", "MockモードのためLLM推論は行われていません。"],
+            "improvements_from_previous": ["前回の指摘は修正されています（ダミー判定）"]
         }
 
     # 実際のOllama呼び出し
@@ -879,13 +954,15 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
         publish_notification(task_id, "LLM", "AI分析中 (3/4)")
 
         # プロンプト組み立て
-        prompt = build_analysis_prompt(
+        prompt_result = build_analysis_prompt(
             paper_text=parsed_text,
             conference_context=conference_context,
             previous_feedback=previous_feedback,
             rag_context=rag_context,
             diff_text=diff_text
         )
+        prompt = prompt_result["full_text"]
+        prompt_components = prompt_result["components"]
 
         if settings.debug_mode:
             print(f"【デバッグ】プロンプト長: {len(prompt)}文字")
@@ -899,7 +976,7 @@ def process_task(task_id: int, task_data: Optional[dict] = None):
         )
 
         print("Calling Ollama for analysis...")
-        result = call_ollama(prompt, is_mock_extended=is_mock_extended)
+        result = call_ollama(prompt, prompt_components=prompt_components, is_mock_extended=is_mock_extended)
         print("Ollama analysis complete")
 
         # ========== Save Feedback ==========

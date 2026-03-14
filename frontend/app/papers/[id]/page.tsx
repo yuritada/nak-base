@@ -109,30 +109,64 @@ export default function PaperDetailPage() {
           </div>
           <div className="p-4">
             <div className="space-y-2">
-              {allVersions.map((version, index) => (
-                <div
-                  key={version.version_id}
-                  className={`flex items-center justify-between p-3 rounded-lg ${
-                    index === 0 ? 'bg-purple-50 border border-purple-200' : 'bg-gray-50'
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <span className={`px-2 py-1 text-xs rounded-full ${
-                      index === 0 ? 'bg-purple-200 text-purple-800' : 'bg-gray-200 text-gray-600'
-                    }`}>
-                      v{version.version_number}
+              {allVersions.map((version, index) => {
+                const isCurrent = version.paper_id === paperId;
+                const isLatest = index === 0;
+
+                // 現在表示中のバージョンはリンクにしない
+                if (isCurrent) {
+                  return (
+                    <div
+                      key={version.version_id}
+                      className="flex items-center justify-between p-3 rounded-lg bg-purple-50 border border-purple-200"
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className="px-2 py-1 text-xs rounded-full bg-purple-200 text-purple-800">
+                          v{version.version_number}
+                        </span>
+                        <span className="text-xs text-purple-600 font-medium">表示中</span>
+                        {isLatest && (
+                          <span className="text-xs text-green-600 font-medium">最新</span>
+                        )}
+                      </div>
+                      <span className="text-sm text-gray-500">
+                        {version.created_at
+                          ? new Date(version.created_at).toLocaleString('ja-JP')
+                          : '-'}
+                      </span>
+                    </div>
+                  );
+                }
+
+                // 他のバージョンはクリック可能なリンクにする
+                return (
+                  <Link
+                    key={version.version_id}
+                    href={`/papers/${version.paper_id}`}
+                    className={`flex items-center justify-between p-3 rounded-lg transition-colors ${
+                      isLatest
+                        ? 'bg-purple-50 border border-purple-200 hover:bg-purple-100'
+                        : 'bg-gray-50 hover:bg-gray-100'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className={`px-2 py-1 text-xs rounded-full ${
+                        isLatest ? 'bg-purple-200 text-purple-800' : 'bg-gray-200 text-gray-600'
+                      }`}>
+                        v{version.version_number}
+                      </span>
+                      {isLatest && (
+                        <span className="text-xs text-purple-600 font-medium">最新</span>
+                      )}
+                    </div>
+                    <span className="text-sm text-gray-500">
+                      {version.created_at
+                        ? new Date(version.created_at).toLocaleString('ja-JP')
+                        : '-'}
                     </span>
-                    {index === 0 && (
-                      <span className="text-xs text-purple-600 font-medium">最新</span>
-                    )}
-                  </div>
-                  <span className="text-sm text-gray-500">
-                    {version.created_at
-                      ? new Date(version.created_at).toLocaleString('ja-JP')
-                      : '-'}
-                  </span>
-                </div>
-              ))}
+                  </Link>
+                );
+              })}
             </div>
           </div>
         </div>
