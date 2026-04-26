@@ -1,6 +1,6 @@
 """
 nak-base Worker用データモデル
-Backend側と完全に同期（Phase 1-1対応）
+Backend側と完全に同期（Phase 1-3対応）
 
 注意: このファイルは backend/app/models.py と同じ構造を維持すること
 """
@@ -11,6 +11,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from pgvector.sqlalchemy import Vector
 import enum
 
 from .database import Base
@@ -26,6 +27,7 @@ class UserRole(str, enum.Enum):
 
 class FileRole(str, enum.Enum):
     MAIN_PDF = "MAIN_PDF"
+    MAIN_DOCX = "MAIN_DOCX"
     SOURCE_TEX = "SOURCE_TEX"
     ADDITIONAL_FILE = "ADDITIONAL_FILE"
 
@@ -73,11 +75,15 @@ class Paper(Base):
     """
     2. papers (論文基本情報)
     主キーは paper_id で統一（Backend側と一致）
+
+    Phase 1-3: conference_id, parent_paper_id 追加
     """
     __tablename__ = "papers"
 
     paper_id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    conference_id = Column(String(50), ForeignKey("conference_rules.rule_id", ondelete="SET NULL"), nullable=True)
+    parent_paper_id = Column(Integer, ForeignKey("papers.paper_id", ondelete="SET NULL"), nullable=True)
     title = Column(String(500), nullable=False)
     status = Column(SQLEnum(PaperStatus), nullable=False, default=PaperStatus.PROCESSING)
     is_deleted = Column(Boolean, nullable=False, default=False)
@@ -86,6 +92,8 @@ class Paper(Base):
 
     # Relationships
     owner = relationship("User", back_populates="owned_papers")
+    conference = relationship("ConferenceRule", back_populates="papers")
+    parent_paper = relationship("Paper", remote_side="Paper.paper_id", backref="child_papers")
     authors = relationship("PaperAuthor", back_populates="paper", cascade="all, delete-orphan")
     versions = relationship("Version", back_populates="paper", cascade="all, delete-orphan")
 
@@ -208,7 +216,9 @@ class InferenceTask(Base):
 class Embedding(Base):
     """
     8. embeddings (RAG・ベクトル検索用)
-    注意: pgvector の Vector 型はWorkerでは使用しないため省略
+    pgvector を使用したセマンティック検索用データ
+
+    Phase 1-3: nomic-embed-text (768次元) を使用
     """
     __tablename__ = "embeddings"
 
@@ -220,8 +230,7 @@ class Embedding(Base):
     line_number = Column(Integer, nullable=True)
     content_chunk = Column(Text, nullable=False)
     location_json = Column(JSONB, nullable=True)
-    # embedding カラムは Vector 型だが、Workerでは直接操作しないため Text で代用
-    # 実際のDB上は Vector(1536) として存在
+    embedding = Column(Vector(768), nullable=True)  # nomic-embed-text dimension
     created_at = Column(DateTime, server_default=func.now())
 
     # Relationships
@@ -231,6 +240,9 @@ class Embedding(Base):
 class ConferenceRule(Base):
     """
     9. conference_rules (学会別ルール定義)
+
+    Phase 1-3: プロンプトに埋め込む学会ルール
+    - embedding: スタイルガイドのベクトル表現（セマンティック検索用）
     """
     __tablename__ = "conference_rules"
 
@@ -238,11 +250,13 @@ class ConferenceRule(Base):
     name = Column(String(255), nullable=False)
     format_rules = Column(JSONB, nullable=True)
     style_guide = Column(Text, nullable=True)
+    embedding = Column(Vector(768), nullable=True)  # セマンティック検索用ベクトル
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     # Relationships
     inference_tasks = relationship("InferenceTask", back_populates="conference_rule")
+    papers = relationship("Paper", back_populates="conference")
 
 
 class VersionDiff(Base):

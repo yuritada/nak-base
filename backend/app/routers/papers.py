@@ -1,11 +1,12 @@
 """
 論文ルーター
 Phase 1.5: SSE対応・参照モード対応
+Phase 1-3: バージョン履歴表示改善
 """
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from typing import List, Optional
+from typing import List, Optional, Set
 import os
 import uuid
 
@@ -35,38 +36,124 @@ def get_task_phase_text(status: TaskStatus) -> str:
     return phase_map.get(status, "不明")
 
 
+def find_root_paper(db: Session, paper: Paper) -> Paper:
+    """
+    指定された論文のルート（起点）論文を取得
+
+    親論文を再帰的に遡り、parent_paper_id が None の論文を返す
+    """
+    current = paper
+    visited: Set[int] = set()  # 無限ループ防止
+
+    while current.parent_paper_id is not None:
+        if current.paper_id in visited:
+            break  # 循環参照があれば終了
+        visited.add(current.paper_id)
+
+        parent = db.query(Paper).filter(Paper.paper_id == current.parent_paper_id).first()
+        if not parent:
+            break
+        current = parent
+
+    return current
+
+
+def find_all_descendant_papers(db: Session, root_paper_id: int) -> List[Paper]:
+    """
+    ルート論文から派生した全ての子孫論文を取得（ルート含む）
+
+    BFS（幅優先探索）で parent_paper_id を辿る
+    """
+    all_papers = []
+    visited: Set[int] = set()
+    queue = [root_paper_id]
+
+    while queue:
+        current_id = queue.pop(0)
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+
+        paper = db.query(Paper).filter(Paper.paper_id == current_id).first()
+        if paper:
+            all_papers.append(paper)
+
+            # この論文を親とする子論文を探す
+            children = db.query(Paper).filter(Paper.parent_paper_id == current_id).all()
+            for child in children:
+                if child.paper_id not in visited:
+                    queue.append(child.paper_id)
+
+    return all_papers
+
+
 @router.get("/", response_model=List[PaperListItem])
 def list_papers(db: Session = Depends(get_db)):
     """
-    論文一覧を取得（削除されていないもののみ）
+    論文一覧を取得（ルート論文のみ）
 
-    最新バージョンのタスク情報を含むフラットなレスポンスを返す
+    Phase 1-3改善:
+    - 親論文を持たない（parent_paper_id = None）ルート論文のみを返す
+    - 再提出（リビジョン）された論文はバージョン履歴で確認する
+    - 最新の子孫論文のタスク情報を表示
     """
-    papers = db.query(Paper).filter(Paper.is_deleted == False).order_by(Paper.created_at.desc()).all()
+    # ルート論文のみ取得（parent_paper_id が None のもの）
+    root_papers = db.query(Paper).filter(
+        Paper.is_deleted == False,
+        Paper.parent_paper_id == None  # ルート論文のみ
+    ).order_by(Paper.created_at.desc()).all()
 
     result = []
-    for paper in papers:
-        # 最新バージョンを取得
-        latest_version = db.query(Version).filter(
-            Version.paper_id == paper.paper_id
-        ).order_by(desc(Version.version_number)).first()
+    for root_paper in root_papers:
+        # このルート論文の全ての子孫を取得
+        all_family_papers = find_all_descendant_papers(db, root_paper.paper_id)
 
+        # 全子孫の中から最新のバージョンとタスクを探す
+        latest_version = None
         latest_task = None
-        if latest_version:
-            # 最新バージョンの最新タスクを取得
-            latest_task = db.query(InferenceTask).filter(
-                InferenceTask.version_id == latest_version.version_id
-            ).order_by(desc(InferenceTask.created_at)).first()
+
+        for family_paper in all_family_papers:
+            versions = db.query(Version).filter(
+                Version.paper_id == family_paper.paper_id
+            ).order_by(desc(Version.version_number)).all()
+
+            for ver in versions:
+                if latest_version is None or ver.version_number > latest_version.version_number:
+                    latest_version = ver
+                    # このバージョンの最新タスクを取得
+                    task = db.query(InferenceTask).filter(
+                        InferenceTask.version_id == ver.version_id
+                    ).order_by(desc(InferenceTask.created_at)).first()
+                    if task:
+                        latest_task = task
+
+        # 最新の子孫論文のステータスを表示に使用
+        latest_paper = max(all_family_papers, key=lambda p: p.created_at) if all_family_papers else root_paper
+
+        # 全バージョン数をカウント
+        total_versions = 0
+        for family_paper in all_family_papers:
+            version_count = db.query(Version).filter(
+                Version.paper_id == family_paper.paper_id
+            ).count()
+            total_versions += version_count
+
+        # 子論文（再提出）の数をカウント
+        child_paper_count = len(all_family_papers) - 1  # ルート論文を除く
 
         item = PaperListItem(
-            paper_id=paper.paper_id,
-            owner_id=paper.owner_id,
-            title=paper.title,
-            status=paper.status,
-            created_at=paper.created_at,
+            paper_id=root_paper.paper_id,  # ルート論文のIDを表示
+            owner_id=root_paper.owner_id,
+            conference_id=latest_paper.conference_id,  # 最新の学会ID
+            parent_paper_id=None,  # ルートなので必ずNone
+            title=root_paper.title,  # ルート論文のタイトル
+            status=latest_paper.status,  # 最新論文のステータス
+            created_at=root_paper.created_at,
             latest_task_id=latest_task.task_id if latest_task else None,
             latest_task_status=latest_task.status if latest_task else None,
             phase=get_task_phase_text(latest_task.status) if latest_task else None,
+            total_versions=total_versions,
+            child_paper_count=child_paper_count,
         )
         result.append(item)
 
@@ -84,13 +171,38 @@ def get_paper(paper_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{paper_id}/versions", response_model=List[VersionResponse])
 def list_versions(paper_id: int, db: Session = Depends(get_db)):
-    """論文のバージョン一覧を取得"""
+    """
+    論文のバージョン履歴を取得（親子関係を含む全履歴）
+
+    Phase 1-3改善:
+    1. 指定されたpaper_idからルート論文を特定
+    2. ルート論文から全ての子孫論文を取得
+    3. 全論文のバージョンを統合してソート
+
+    これにより、再提出を繰り返した論文の全変遷を一覧できる
+    """
     paper = db.query(Paper).filter(Paper.paper_id == paper_id).first()
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    versions = db.query(Version).filter(Version.paper_id == paper_id).order_by(Version.version_number.desc()).all()
-    return versions
+    # ルート論文を特定
+    root_paper = find_root_paper(db, paper)
+
+    # ルート論文から全ての子孫論文を取得
+    all_family_papers = find_all_descendant_papers(db, root_paper.paper_id)
+
+    # 全論文のバージョンを収集
+    all_versions = []
+    for family_paper in all_family_papers:
+        versions = db.query(Version).filter(
+            Version.paper_id == family_paper.paper_id
+        ).all()
+        all_versions.extend(versions)
+
+    # バージョン番号でソート（降順: 最新が先頭）
+    all_versions.sort(key=lambda v: (v.version_number, v.created_at), reverse=True)
+
+    return all_versions
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -98,6 +210,8 @@ async def upload_paper(
     title: str = Form(...),
     file: UploadFile = File(...),
     is_reference: Optional[bool] = Form(False),
+    conference_id: Optional[str] = Form(None),
+    parent_paper_id: Optional[int] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -105,19 +219,21 @@ async def upload_paper(
 
     Args:
         title: 論文タイトル
-        file: アップロードファイル（PDF, ZIP, TeX）
+        file: アップロードファイル（PDF, ZIP, TeX, DOCX）
         is_reference: 参考論文フラグ（True=解析スキップ）
+        conference_id: 対象学会のID（ConferenceRuleのrule_id）
+        parent_paper_id: 再提出の場合、前回の論文ID
 
     フロー:
     1. ファイルをローカルボリュームに保存
-    2. Paper レコード作成
-    3. Version レコード作成 (version_number=1)
+    2. Paper レコード作成（conference_id, parent_paper_id含む）
+    3. Version レコード作成 (version_number自動決定)
     4. File レコード作成
     5. InferenceTask レコード作成 (status=Pending)
-    6. Redisにタスクを投入（job_typeを含む）
+    6. Redisにタスクを投入（job_type, conference_id含む）
     """
     if settings.debug_mode:
-        print(f"【デバッグ】論文アップロード受信: タイトル='{title}', ファイル='{file.filename}', is_reference={is_reference}")
+        print(f"【デバッグ】論文アップロード受信: タイトル='{title}', ファイル='{file.filename}', is_reference={is_reference}, conference_id={conference_id}, parent_paper_id={parent_paper_id}")
 
     # PDF, ZIP, TeX, DOCXを受付
     lower_filename = file.filename.lower()
@@ -162,22 +278,46 @@ async def upload_paper(
     # 参考論文の場合は最初からCOMPLETEDステータス
     initial_status = PaperStatus.COMPLETED if is_reference else PaperStatus.PROCESSING
 
+    # conference_idの検証（指定されている場合）
+    if conference_id:
+        from ..models import ConferenceRule
+        conf = db.query(ConferenceRule).filter(ConferenceRule.rule_id == conference_id).first()
+        if not conf:
+            raise HTTPException(status_code=400, detail=f"Conference rule '{conference_id}' not found")
+
+    # parent_paper_idの検証（指定されている場合）
+    if parent_paper_id:
+        parent = db.query(Paper).filter(Paper.paper_id == parent_paper_id).first()
+        if not parent:
+            raise HTTPException(status_code=400, detail=f"Parent paper '{parent_paper_id}' not found")
+
     paper = Paper(
         owner_id=1,  # デモユーザー（Phase 2でOAuth実装時に変更）
         title=title,
-        status=initial_status
+        status=initial_status,
+        conference_id=conference_id,
+        parent_paper_id=parent_paper_id
     )
     db.add(paper)
     db.commit()
     db.refresh(paper)
 
     if settings.debug_mode:
-        print(f"【デバッグ】Paper作成: paper_id={paper.paper_id}")
+        print(f"【デバッグ】Paper作成: paper_id={paper.paper_id}, conference_id={conference_id}, parent_paper_id={parent_paper_id}")
 
     # 2. Version作成
+    # 再提出の場合は親論文のバージョン数+1
+    version_number = 1
+    if parent_paper_id:
+        max_version = db.query(Version).join(Paper).filter(
+            (Paper.paper_id == parent_paper_id) | (Paper.parent_paper_id == parent_paper_id)
+        ).order_by(desc(Version.version_number)).first()
+        if max_version:
+            version_number = max_version.version_number + 1
+
     version = Version(
         paper_id=paper.paper_id,
-        version_number=1
+        version_number=version_number
     )
     db.add(version)
     db.commit()
@@ -208,22 +348,29 @@ async def upload_paper(
 
     task = InferenceTask(
         version_id=version.version_id,
-        status=initial_task_status
+        status=initial_task_status,
+        conference_rule_id=conference_id  # 学会ルールを紐付け
     )
     db.add(task)
     db.commit()
     db.refresh(task)
 
     if settings.debug_mode:
-        print(f"【デバッグ】InferenceTask作成: task_id={task.task_id}, status={initial_task_status}")
+        print(f"【デバッグ】InferenceTask作成: task_id={task.task_id}, status={initial_task_status}, conference_rule_id={conference_id}")
 
     # 5. Redisにタスク追加（参考論文でない場合のみ）
     if not is_reference:
         job_type = "ANALYSIS"
-        push_task_with_payload(task.task_id, job_type)
+        # Phase 1-3: conference_id と parent_paper_id をペイロードに含める
+        push_task_with_payload(
+            task.task_id,
+            job_type,
+            conference_id=conference_id,
+            parent_paper_id=parent_paper_id
+        )
 
         if settings.debug_mode:
-            print(f"【デバッグ】RedisキューにTask ID={task.task_id}, job_type={job_type}を投入しました")
+            print(f"【デバッグ】RedisキューにTask ID={task.task_id}, job_type={job_type}, conference_id={conference_id}を投入しました")
     else:
         if settings.debug_mode:
             print(f"【デバッグ】参考論文のためキューへの投入をスキップしました")

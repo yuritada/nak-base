@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from .routers import auth, papers, stream
+from .routers import auth, papers, stream, conferences
 from .services.queue_service import get_queue_length
 from .database import engine, Base
 from .config import get_settings
@@ -215,6 +215,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(papers.router)
 app.include_router(stream.router)
+app.include_router(conferences.router)
 
 
 @app.get("/")
