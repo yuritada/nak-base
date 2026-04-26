@@ -14,3 +14,15 @@ services:
     volumes:
       - ./tests:/app/tests:ro
       - ./logs:/app/logs
+
+  # デバッグモード時のみ、OllamaコンテナをPythonのモックサーバーにすり替える
+  ollama:
+    image: python:3.11-slim
+    container_name: nak_base_ollama_mock
+    volumes:
+      - ./tests:/app/tests:ro
+    working_dir: /app
+    # 起動時に必要なライブラリをインストールし、モックサーバーをポート11434で起動
+    command: >
+      bash -c "pip install fastapi uvicorn &&
+      uvicorn tests.mock_ollama:app --host 0.0.0.0 --port 11434"

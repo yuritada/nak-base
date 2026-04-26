@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     ollama_url: str
     parser_url: str
     storage_path: str = "/storage"
-    mock_mode: bool = True
+    mock_mode: bool = False
     debug_mode: bool = False
 
     # Embedding設定 (Phase 1-3 RAG)

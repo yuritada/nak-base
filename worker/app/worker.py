@@ -233,10 +233,24 @@ def build_analysis_prompt(paper_text: str, context: dict) -> dict:
 
 # ================== Task Processing ==================
 
-def process_task(task_id: int, task_data: Optional[dict] = None):
+def process_task(task_id, task_data: Optional[dict] = None):
     """タスクを処理するメイン関数"""
     if settings.debug_mode:
         print(f"【デバッグ】タスク処理開始: Task ID={task_id}, Data={task_data}")
+
+    # SYSTEM_DIAGNOSIS タスクは通常の推論フローには流さず、診断モジュールに委譲する
+    if task_data and task_data.get("type") == "SYSTEM_DIAGNOSIS":
+        if not settings.debug_mode:
+            print(f"Skipping SYSTEM_DIAGNOSIS task {task_id} (debug_mode=False)")
+            return
+        try:
+            from tests.worker_check import run_worker_diagnosis
+            run_worker_diagnosis(task_data)
+        except ImportError as e:
+            print(f"Diagnosis module not available: {e}")
+        except Exception as e:
+            print(f"Diagnosis task {task_id} failed: {e}")
+        return
 
     db = get_db_session()
     try:
