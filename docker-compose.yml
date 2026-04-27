@@ -96,7 +96,7 @@ services:
     restart: always
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-  # AI Inference Worker (シングルプロセス、順次実行)
+  # AI Inference Worker (マルチエージェント・パイプライン)
   worker:
     build:
       context: ./worker
@@ -111,9 +111,25 @@ services:
       STORAGE_PATH: /storage
       MOCK_MODE: ${MOCK_MODE:-false}
       DEBUG_MODE: ${DEBUG_MODE:-false}
+      # Multi-Agent: provider 切替
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      # Gemini
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_API_KEY_FILE: ${GEMINI_API_KEY_FILE:-/secrets/gemini_api_key}
+      GEMINI_MODEL_FLASH: ${GEMINI_MODEL_FLASH:-gemini-1.5-flash}
+      GEMINI_MODEL_PRO: ${GEMINI_MODEL_PRO:-gemini-1.5-pro}
+      # OpenAI / GPT
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_KEY_FILE: ${OPENAI_API_KEY_FILE:-/secrets/openai_api_key}
+      OPENAI_MODEL_FAST: ${OPENAI_MODEL_FAST:-gpt-4o-mini}
+      OPENAI_MODEL_PRO: ${OPENAI_MODEL_PRO:-gpt-4o}
+      # 並列実行
+      AGENTS_PARALLEL: ${AGENTS_PARALLEL:-true}
+      AGENT_TIMEOUT: ${AGENT_TIMEOUT:-300}
     volumes:
       - ./worker:/app
       - paper_storage:/storage:ro
+      - ./secrets:/secrets:ro
     depends_on:
       db:
         condition: service_healthy

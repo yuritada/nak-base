@@ -18,8 +18,9 @@ from .models import (
     InferenceTask, File, Feedback, Paper, Version,
     TaskStatus, PaperStatus, ConferenceRule, Embedding
 )
-from .services.ollama_client import generate_embedding, call_ollama_completion
+from .services.ollama_client import generate_embedding
 from .services.parser_client import call_parser
+from .orchestrator import run_agents, merge_results
 
 settings = get_settings()
 
@@ -27,8 +28,14 @@ TASK_QUEUE = "tasks"
 NOTIFICATION_CHANNEL = "task_notifications"
 
 
-def publish_notification(task_id: int, status: str, phase: str | None = None, error_message: str | None = None):
-    """タスク通知をRedis Pub/Subに発行"""
+def publish_notification(
+    task_id: int,
+    status: str,
+    phase: str | None = None,
+    error_message: str | None = None,
+    agent: str | None = None,
+):
+    """タスク通知をRedis Pub/Subに発行（マルチエージェント対応）"""
     try:
         client = get_redis_client()
         notification = {
@@ -36,6 +43,7 @@ def publish_notification(task_id: int, status: str, phase: str | None = None, er
             "status": status,
             "phase": phase,
             "error_message": error_message,
+            "agent": agent,
         }
         client.publish(NOTIFICATION_CHANNEL, json.dumps(notification))
         if settings.debug_mode:
@@ -181,56 +189,6 @@ def get_full_context(db, task: InferenceTask, paper_text: str, primary_file_id: 
     }
 
 
-# ================== Prompt Builder ==================
-
-def build_analysis_prompt(paper_text: str, context: dict) -> dict:
-    """コンテキストを含む分析プロンプトを組み立てる"""
-    sections, components = [], {}
-    
-    def add_section(title, content, component_key):
-        if content:
-            components[component_key] = content
-            sections.extend(["="*50, f"## {title}", "", str(content), ""])
-        else:
-            components[component_key] = None
-
-    header = "あなたは学術論文のレビューを行う専門家です。以下の論文を分析し、改善提案を行ってください。"
-    sections.append(header)
-    components["header"] = header
-
-    # コンテキストの追加
-    add_section("対象学会・投稿規定", context.get("conference_context"), "conference_context")
-    add_section("前回提出時のフィードバック", context.get("previous_feedback"), "previous_feedback")
-    add_section("前回論文との差分（Unified Diff）", f"```diff\n{context.get('diff_text')}\n```", "diff_summary")
-    add_section("参考: 関連する過去のフィードバック", context.get("rag_context", {}).get("related_chunks"), "rag_chunks")
-
-    # 指示
-    instructions = """
-## 分析内容
-1. 要約（summary）: 200文字程度で論文の概要を説明
-2. 誤字脱字（typos）: 検出された誤字脱字のリスト
-3. 改善提案（suggestions）: 論文を改善するための具体的な提案
-4. 前回からの改善点（improvements_from_previous）: 前回フィードバックに対する改善状況（再提出の場合）
-
-## 出力形式（JSON）
-{
-  "summary": "論文の要約...",
-  "typos": ["誤字1", "誤字2"],
-  "suggestions": ["提案1", "提案2"],
-  "improvements_from_previous": ["改善点1", "改善点2"]
-}
-"""
-    sections.append(instructions)
-    components["instructions"] = instructions
-
-    # 論文テキスト
-    paper_text_truncated = paper_text[:10000]
-    components["paper_text_preview"] = paper_text[:2000] + ("..." if len(paper_text) > 2000 else "")
-    sections.extend(["="*50, "## 論文テキスト", paper_text_truncated, "", "## 回答（JSON形式）"])
-
-    return {"full_text": "\n".join(sections), "components": components}
-
-
 # ================== Task Processing ==================
 
 def process_task(task_id, task_data: Optional[dict] = None):
@@ -284,28 +242,35 @@ def process_task(task_id, task_data: Optional[dict] = None):
             if settings.debug_mode: print(f"【デバッグ】Embedding保存完了: {saved_count}件")
         
         context = get_full_context(db, task, parsed_text, primary_file.file_id)
+        # エージェントへ渡す共通コンテキストへ paper_text を含める
+        context["paper_text"] = parsed_text
 
-        # --- 3. LLM ---
+        # --- 3. LLM (マルチエージェント・パイプライン) ---
         task.status = TaskStatus.LLM
         db.commit()
-        publish_notification(task_id, "LLM", "AI分析中 (3/4)")
+        publish_notification(task_id, "LLM", "マルチエージェント解析中 (3/4)")
 
-        prompt_result = build_analysis_prompt(parsed_text, context)
-        if settings.debug_mode: print(f"【デバッグ】プロンプト長: {len(prompt_result['full_text'])}文字")
+        def _agent_notify(agent_name: str, label: str):
+            publish_notification(task_id, "LLM", label, agent=agent_name)
 
-        llm_result = call_ollama_completion(prompt_result["full_text"], prompt_components=prompt_result["components"])
-        print("Ollama analysis complete")
+        agent_results = run_agents(context, notify=_agent_notify)
+        merged = merge_results(agent_results)
+        if settings.debug_mode:
+            print(f"【デバッグ】Agent meta: {merged.get('agent_meta')}")
+        print("Multi-agent analysis complete")
 
         # --- 4. SAVE FEEDBACK ---
         feedback = Feedback(
             version_id=version.version_id,
             task_id=task.task_id,
             comments_json={
-                "typos": llm_result.get("typos", []),
-                "suggestions": llm_result.get("suggestions", []),
-                "improvements_from_previous": llm_result.get("improvements_from_previous", [])
+                "typos": merged.get("typos", []),
+                "suggestions": merged.get("suggestions", []),
+                "improvements_from_previous": merged.get("improvements_from_previous", []),
+                "agents": merged.get("agents", {}),
+                "agent_meta": merged.get("agent_meta", {}),
             },
-            overall_summary=llm_result.get("summary", "")
+            overall_summary=merged.get("summary", "")
         )
         db.add(feedback)
 
@@ -351,9 +316,12 @@ def parse_task_data(data: bytes) -> tuple:
 def main():
     """Main worker loop."""
     print("=" * 50)
-    print(" NAK-BASE AI INFERENCE WORKER (Refactored)")
+    print(" NAK-BASE AI INFERENCE WORKER (Multi-Agent Pipeline)")
     print(f"  Mode: {'Mock' if settings.mock_mode else 'Live'}, Debug: {settings.debug_mode}")
     print(f"  Ollama: {settings.ollama_url}, Parser: {settings.parser_url}")
+    print(f"  LLM Provider: {settings.llm_provider}, "
+          f"fast={settings.model_for(use_pro=False)}, pro={settings.model_for(use_pro=True)}")
+    print(f"  Agents: parallel={settings.agents_parallel}, timeout={settings.agent_timeout}s")
     print("=" * 50)
 
     client = get_redis_client()
