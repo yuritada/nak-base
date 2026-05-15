@@ -2,18 +2,33 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for pymupdf and general processing
+# System dependencies for Docling and its ML pipeline:
+#   libgl1, libglib2.0-0  — required by opencv-python-headless (used by Docling)
+#   libgomp1              — OpenMP runtime required by PyTorch / EasyOCR
+#   poppler-utils         — PDF rendering utilities used by Docling's PDF pipeline
+#   gcc / libc-dev / libffi-dev — general build tools for compiled Python packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libc-dev \
     libffi-dev \
-    libmupdf-dev \
-    mupdf-tools \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-download Docling ML models during image build so the first request
+# is not delayed by model downloads at runtime.
+RUN python - <<'EOF'
+from docling.document_converter import DocumentConverter
+# Instantiating the converter triggers model downloads.
+_ = DocumentConverter()
+print("Docling models pre-loaded successfully.")
+EOF
 
 COPY . .
 

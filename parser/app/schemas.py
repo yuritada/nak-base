@@ -27,9 +27,10 @@ class ParseRequest(BaseModel):
 class TextItem(BaseModel):
     """Individual text item with optional bounding box coordinates"""
     text: str
-    bbox: Optional[List[float]] = None  # [x0, y0, x1, y1] in PDF points
+    bbox: Optional[List[float]] = None  # [l, t, r, b] in PDF points
     font_size: Optional[float] = None
     is_heading: bool = False
+    element_type: Optional[str] = None  # "Paragraph", "SectionHeader", "Title", "Table", etc.
 
 
 class PageData(BaseModel):

@@ -1,7 +1,7 @@
 # nak-base MVP
 COMPOSE = docker-compose
 
-.PHONY: help up build down restart clean logs ps setup-ollama debug-up debug-down test test-parser
+.PHONY: help up build down restart clean logs ps setup-ollama debug-up debug-down test test-parser test-docling
 
 # デフォルトのターゲット
 help:
@@ -21,6 +21,7 @@ help:
 	@echo "  make debug-down   - デバッグモードを停止"
 	@echo "  make test         - システム診断を実行"
 	@echo "  make test-parser  - Parser高度機能テスト（Phase 1-2）"
+	@echo "  make test-docling - Docling統合テスト（Phase 1.3: 実PDFで検証）"
 	@echo ""
 	@echo "初回セットアップ手順:"
 	@echo "  1. make build"
@@ -150,3 +151,17 @@ test-parser:
 	@docker compose exec backend pip install requests > /dev/null 2>&1
 	@docker compose exec backend python /app/tests/test_parser_advanced.py || \
 		(echo ""; echo "ERROR: Parser tests failed."; exit 1)
+
+# Docling統合テスト（Phase 1.3）
+# test_pdf/ をパーサーコンテナ内 /test_pdf にマウントしてテスト実行
+# 前提: make debug-up でデバッグモードで起動済みであること
+test-docling:
+	@echo "=============================================="
+	@echo " Running Docling Parser Tests (Phase 1.3)..."
+	@echo "=============================================="
+	@docker compose -f docker-compose.yml -f docker-compose.debug.yml \
+		exec backend pip install requests > /dev/null 2>&1
+	@docker compose -f docker-compose.yml -f docker-compose.debug.yml \
+		exec backend python /app/tests/test_docling_parser.py || \
+		(echo ""; echo "ERROR: Docling tests failed."; \
+		 echo "デバッグモードで起動していますか？ (make debug-up)"; exit 1)

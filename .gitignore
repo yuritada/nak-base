@@ -43,3 +43,5 @@ logs.txt
 # Diagnosis logs
 logs/
 !logs/.gitkeep
+
+.secrets
