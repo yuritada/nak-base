@@ -22,6 +22,7 @@ help:
 	@echo "  make exec-worker  - Workerコンテナにログイン"
 	@echo "  make exec-parser  - Parserコンテナにログイン"
 	@echo "  make exec-db      - DBコンテナにログイン"
+	@echo "  make db-postgres  - PostgreSQLにログイン"
 	@echo "  make exec-redis   - Redisコンテナにログイン"
 	@echo "  make exec-ollama  - Ollamaコンテナにログイン"
 	@echo ""
@@ -113,6 +114,9 @@ exec-parser:
 
 exec-db:
 	$(COMPOSE) exec db bash
+
+db-postgres:
+	$(COMPOSE) exec db psql -U nakbase -d nakbase
 
 exec-redis:
 	$(COMPOSE) exec redis sh
