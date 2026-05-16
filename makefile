@@ -203,6 +203,9 @@ test-docling:
 		exec backend python /app/tests/test_docling_parser.py || \
 		(echo ""; echo "ERROR: Docling tests failed."; \
 		 echo "デバッグモードで起動していますか？ (make debug-up)"; exit 1)
+	@docker compose -f docker-compose.yml -f docker-compose.debug.yml \
+		cp backend:/app/reconstructed ./reconstructed
+	@echo "Docling Parser Tests completed. Reconstructed files copied to ./reconstructed"
 
 # Docling視覚化テスト
 # 実行時のみコンテナ内に一時的にパッケージをインストールし、本番環境を汚染しない

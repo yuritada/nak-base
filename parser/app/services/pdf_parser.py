@@ -99,7 +99,7 @@ class PDFParser:
     def converter(self):
         if self._converter is None:
             from docling.document_converter import DocumentConverter, PdfFormatOption
-            from docling.pipeline.standard_pdf_pipeline import PdfPipelineOptions
+            from docling.datamodel.pipeline_options import PdfPipelineOptions
             from docling.datamodel.base_models import InputFormat
 
             pipeline_options = PdfPipelineOptions()

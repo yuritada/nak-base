@@ -262,8 +262,8 @@ def test_parse_pdf(pdf_name: str, r: Result, index: int):
                 + str([c.get("content", "")[:30] for c in short_chunks[:3]]))
 
         # Write reconstructed text to file for manual inspection.
-        # Prefer TEST_OUTPUT_DIR env var, then /tmp (always writable in container).
-        output_dir = os.getenv("TEST_OUTPUT_DIR", "/tmp")
+        # Prefer TEST_OUTPUT_DIR env var, then /app/reconstructed (always writable in container).
+        output_dir = os.getenv("TEST_OUTPUT_DIR", "/app/reconstructed")
         stem = os.path.splitext(pdf_name)[0]
         out_path = os.path.join(output_dir, f"{stem}_reconstructed.txt")
         reconstructed = "\n\n".join(
