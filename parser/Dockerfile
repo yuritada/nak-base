@@ -19,6 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies
 COPY requirements.txt .
+
+RUN pip install --upgrade pip
+# 1. PyTorchのCUDA 12.1対応版をインストールする
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# 2. 次に、requirements.txt の中身を通常のルート（PyPI）からインストールする
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-download Docling ML models during image build so the first request

@@ -1,14 +1,15 @@
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-pypdf==4.0.1
-pydantic==2.5.3
+# バージョン固定を緩和（または削除）する
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pypdf>=4.0.1
+pydantic>=2.7.0  # doclingは比較的新しいpydanticを要求することが多いです
 
 # Phase 1-2: Advanced parsing
-chardet==5.2.0
-python-multipart==0.0.6
+chardet>=5.2.0
+python-multipart>=0.0.6
 
-# Phase 1.3: Docling semantic layout analysis (replaces PyMuPDF for PDF)
-docling>=2.0.0
+# Phase 1.3: Docling semantic layout analysis
+docling
 
 # Phase 1.5: DOCX support
-python-docx==1.1.0
+python-docx

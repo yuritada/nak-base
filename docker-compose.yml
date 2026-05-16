@@ -59,6 +59,13 @@ services:
     container_name: nak_base_parser
     environment:
       DEBUG_MODE: "true"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     volumes:
       - ./parser:/app
       - paper_storage:/storage:ro
