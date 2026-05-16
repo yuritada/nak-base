@@ -1,7 +1,7 @@
 # nak-base MVP
 COMPOSE = docker-compose
 
-.PHONY: help up build down restart clean logs ps setup-ollama debug-up debug-down test test-parser test-docling
+.PHONY: help up build down restart clean logs ps setup-ollama debug-up debug-down test test-parser test-docling exec-backend exec-frontend exec-worker exec-parser exec-db exec-redis exec-ollama show-diagnosis visualize-docling
 
 # デフォルトのターゲット
 help:
@@ -16,12 +16,22 @@ help:
 	@echo "  make ps           - コンテナ状態を表示"
 	@echo "  make setup-ollama - Ollamaモデルをダウンロード（初回のみ）"
 	@echo ""
+	@echo "コンテナへのログイン:"
+	@echo "  make exec-backend - バックエンドコンテナにログイン"
+	@echo "  make exec-frontend- フロントエンドコンテナにログイン"
+	@echo "  make exec-worker  - Workerコンテナにログイン"
+	@echo "  make exec-parser  - Parserコンテナにログイン"
+	@echo "  make exec-db      - DBコンテナにログイン"
+	@echo "  make exec-redis   - Redisコンテナにログイン"
+	@echo "  make exec-ollama  - Ollamaコンテナにログイン"
+	@echo ""
 	@echo "デバッグ用コマンド:"
 	@echo "  make debug-up     - デバッグモードで起動（テストコード含む）"
 	@echo "  make debug-down   - デバッグモードを停止"
 	@echo "  make test         - システム診断を実行"
 	@echo "  make test-parser  - Parser高度機能テスト（Phase 1-2）"
 	@echo "  make test-docling - Docling統合テスト（Phase 1.3: 実PDFで検証）"
+	@echo "  make visualize-docling - Docling出力の視覚化テスト"
 	@echo ""
 	@echo "初回セットアップ手順:"
 	@echo "  1. make build"
@@ -61,10 +71,10 @@ clean:
 	docker volume prune -f
 	# 3. キャッシュとログの削除
 	docker builder prune -f
-	find . -name "__pycache__" -type d -exec rm -rf {} +
-	find . -name "*.pyc" -delete
-	rm -rf logs/
-	rm -f logs.txt
+	sudo find . -name "__pycache__" -type d -exec rm -rf {} +
+	sudo find . -name "*.pyc" -delete
+	sudo rm -rf logs/
+	sudo rm -f logs.txt
 	@echo "完全クリーンアップ完了"
 	
 
@@ -85,6 +95,30 @@ logs-ollama:
 # ステータス確認
 ps:
 	$(COMPOSE) ps
+
+# ===========================================
+# コンテナへのログイン (Shellアクセス)
+# ===========================================
+exec-backend:
+	$(COMPOSE) exec backend bash
+
+exec-frontend:
+	$(COMPOSE) exec frontend sh
+
+exec-worker:
+	$(COMPOSE) exec worker bash
+
+exec-parser:
+	$(COMPOSE) exec parser bash
+
+exec-db:
+	$(COMPOSE) exec db bash
+
+exec-redis:
+	$(COMPOSE) exec redis sh
+
+exec-ollama:
+	$(COMPOSE) exec ollama bash
 
 # Ollamaモデルのセットアップ（初回のみ必要）
 setup-ollama:
@@ -165,3 +199,26 @@ test-docling:
 		exec backend python /app/tests/test_docling_parser.py || \
 		(echo ""; echo "ERROR: Docling tests failed."; \
 		 echo "デバッグモードで起動していますか？ (make debug-up)"; exit 1)
+
+# Docling視覚化テスト
+# 実行時のみコンテナ内に一時的にパッケージをインストールし、本番環境を汚染しない
+# 処理完了後、ホスト側に visualized_page.png を自動でコピーします
+visualize-docling:
+	@echo "=============================================="
+	@echo " Visualizing Docling Parser Output..."
+	@echo "=============================================="
+	@echo "[1/4] Installing OS dependencies (fonts, poppler)..."
+	@docker compose -f docker-compose.yml -f docker-compose.debug.yml \
+		exec backend bash -c "apt-get update && apt-get install -y poppler-utils poppler-data fonts-noto-cjk > /dev/null 2>&1"
+	@echo "[2/4] Installing Python dependencies..."
+	@docker compose -f docker-compose.yml -f docker-compose.debug.yml \
+		exec backend pip install requests pdf2image Pillow > /dev/null 2>&1
+	@echo "[3/4] Generating visualization image..."
+	@docker compose -f docker-compose.yml -f docker-compose.debug.yml \
+		exec backend python /app/tests/visualize_parser.py --out /tmp/visualized_page.png
+	@echo "[4/4] Copying image to host..."
+	@docker compose -f docker-compose.yml -f docker-compose.debug.yml \
+		cp backend:/tmp/visualized_page.png ./visualized_page.png
+	@echo "=============================================="
+	@echo " ✨ Success! Please check './visualized_page.png' ✨"
+	@echo "=============================================="
