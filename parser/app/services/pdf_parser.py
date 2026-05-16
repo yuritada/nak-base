@@ -8,6 +8,7 @@ Uses Docling (IBM) for:
 - Markdown export
 """
 import os
+import re
 from typing import Dict, List, Optional, Tuple
 
 from ..schemas import ChunkData, DocumentMeta, PageData, ParseResponse, TextItem
@@ -31,6 +32,8 @@ _LABEL_TYPE_MAP: Dict[str, str] = {
 
 _HEADING_TYPES = {"SectionHeader", "Title"}
 _NOISE_TYPES = {"PageHeader", "PageFooter"}
+# Elements that must not be split or filtered by figure containment
+_ATOMIC_TYPES = {"Table", "Formula"}
 
 
 def _label_str(label) -> str:
@@ -38,6 +41,51 @@ def _label_str(label) -> str:
     if hasattr(label, "value"):
         return label.value.lower()
     return str(label).lower().split(".")[-1]
+
+
+def _clean_japanese_text(text: str) -> str:
+    """Remove unnecessary whitespace inserted between Japanese characters.
+
+    Docling sometimes inserts a space at line-wrap points inside Japanese text,
+    breaking search and embedding quality.
+    """
+    jp = r'[ぁ-んァ-ヶー一-龠々〆〇]'
+    jp_punct = r'[ぁ-んァ-ヶー一-龠々〆〇、。！？…―]'
+    # Remove spaces/newlines between two Japanese chars
+    text = re.sub(rf'({jp})\s+({jp})', r'\1\2', text)
+    # Remove spaces between Japanese char and full-width punctuation (both directions)
+    text = re.sub(rf'({jp})\s+({jp_punct})', r'\1\2', text)
+    text = re.sub(rf'({jp_punct})\s+({jp})', r'\1\2', text)
+    return text
+
+
+def _bbox_overlap_ratio(inner: List[float], outer: List[float]) -> float:
+    """Return the fraction of the inner bbox area that is covered by outer bbox.
+
+    Works regardless of coordinate orientation (PDF vs screen space) because we
+    normalise each bbox so that min <= max before computing the intersection.
+    """
+    l1, t1, r1, b1 = inner
+    l2, t2, r2, b2 = outer
+
+    il, ir = min(l1, r1), max(l1, r1)
+    it, ib = min(t1, b1), max(t1, b1)
+    ol, or_ = min(l2, r2), max(l2, r2)
+    ot, ob = min(t2, b2), max(t2, b2)
+
+    xi = max(il, ol)
+    xa = min(ir, or_)
+    yi = max(it, ot)
+    ya = min(ib, ob)
+
+    if xi >= xa or yi >= ya:
+        return 0.0
+
+    inner_area = (ir - il) * (ib - it)
+    if inner_area <= 0:
+        return 0.0
+
+    return (xa - xi) * (ya - yi) / inner_area
 
 
 class PDFParser:
@@ -50,8 +98,24 @@ class PDFParser:
     @property
     def converter(self):
         if self._converter is None:
-            from docling.document_converter import DocumentConverter
-            self._converter = DocumentConverter()
+            from docling.document_converter import DocumentConverter, PdfFormatOption
+            from docling.pipeline.standard_pdf_pipeline import PdfPipelineOptions
+            from docling.datamodel.base_models import InputFormat
+
+            pipeline_options = PdfPipelineOptions()
+            pipeline_options.do_table_structure = True
+            pipeline_options.do_ocr = True
+            # Formula enrichment is available in newer docling versions; skip gracefully if absent
+            try:
+                pipeline_options.do_formula_enrichment = True
+            except AttributeError:
+                pass
+
+            self._converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+                }
+            )
         return self._converter
 
     def parse(self, file_path: str) -> ParseResponse:
@@ -63,7 +127,7 @@ class PDFParser:
 
         meta = self._extract_metadata(doc, file_path)
         pages, all_items = self._extract_pages(doc)
-        content = doc.export_to_markdown()
+        content = _clean_japanese_text(doc.export_to_markdown())
         chunks = self._generate_chunks(pages)
 
         if self.debug:
@@ -83,12 +147,10 @@ class PDFParser:
     def _extract_metadata(self, doc, file_path: str) -> DocumentMeta:
         title: Optional[str] = None
 
-        # Docling stores the document name / detected title
         if getattr(doc, "name", None):
             title = doc.name
 
         if not title:
-            # Fall back to the first Title-labelled item in the document
             for item, _ in doc.iterate_items():
                 if _label_str(item.label) == "title":
                     text = getattr(item, "text", None)
@@ -109,11 +171,12 @@ class PDFParser:
     def _extract_pages(
         self, doc
     ) -> Tuple[List[PageData], List[TextItem]]:
-        """
-        Iterate Docling document items and group them by page.
+        """Iterate Docling document items and group them by page.
 
-        Docling already outputs items in correct reading order (handles
-        2-column layouts internally), so we preserve that order.
+        Two-pass approach:
+        1. Collect all items with bboxes and apply Japanese text cleanup.
+        2. Mark items whose bboxes fall inside a Figure region as non-content,
+           preventing figure caption fragments from polluting the body text.
         """
         # Collect page dimensions
         page_dims: Dict[int, Tuple[float, float]] = {}
@@ -124,33 +187,30 @@ class PDFParser:
                 h = float(size.height) if size else 842.0
                 page_dims[int(page_no)] = (w, h)
 
-        # Collect items per page
-        page_items: Dict[int, List[TextItem]] = {}
-        all_items: List[TextItem] = []
+        # ── Pass 1: collect raw items ─────────────────────────────────
+        raw_items: List[Tuple[int, TextItem]] = []
 
         for item, _ in doc.iterate_items():
             label = _label_str(item.label)
             element_type = _LABEL_TYPE_MAP.get(label, "Paragraph")
 
-            # Extract text; tables fall back to markdown representation
             text: Optional[str] = getattr(item, "text", None)
             if not text and label == "table" and hasattr(item, "export_to_markdown"):
                 text = item.export_to_markdown()
             if not text or not text.strip():
                 continue
 
+            stripped = _clean_japanese_text(text.strip())
             is_heading = element_type in _HEADING_TYPES
-
-            stripped = text.strip()
             is_content_body = element_type not in _NOISE_TYPES
-            # Page-number-only text: short and purely numeric (e.g. "1", "12")
+
+            # Short purely-numeric strings are likely page numbers
             if is_content_body and len(stripped) <= 5 and stripped.isdigit():
                 is_content_body = False
 
             for prov in (item.prov or []):
                 page_no = int(prov.page_no)
                 bbox_obj = prov.bbox
-
                 bbox = [
                     float(bbox_obj.l),
                     float(bbox_obj.t),
@@ -166,10 +226,34 @@ class PDFParser:
                     element_type=element_type,
                     is_content_body=is_content_body,
                 )
-                all_items.append(text_item)
-                page_items.setdefault(page_no, []).append(text_item)
+                raw_items.append((page_no, text_item))
 
-        # Build sorted PageData list
+        # ── Build Figure bbox index per page ──────────────────────────
+        figure_bboxes: Dict[int, List[List[float]]] = {}
+        for page_no, item in raw_items:
+            if item.element_type == "Figure" and item.bbox:
+                figure_bboxes.setdefault(page_no, []).append(item.bbox)
+
+        # ── Pass 2: filter items that lie inside Figure regions ───────
+        page_items: Dict[int, List[TextItem]] = {}
+        all_items: List[TextItem] = []
+
+        for page_no, item in raw_items:
+            if (
+                item.is_content_body
+                and item.element_type not in _ATOMIC_TYPES
+                and item.element_type != "Figure"
+                and item.bbox
+            ):
+                for fig_bbox in figure_bboxes.get(page_no, []):
+                    if _bbox_overlap_ratio(item.bbox, fig_bbox) >= 0.5:
+                        item.is_content_body = False
+                        break
+
+            all_items.append(item)
+            page_items.setdefault(page_no, []).append(item)
+
+        # ── Build sorted PageData list ────────────────────────────────
         all_page_nos = sorted(
             set(list(page_dims.keys()) + list(page_items.keys()))
         )
@@ -182,7 +266,7 @@ class PDFParser:
                     page_number=page_no,
                     width=w,
                     height=h,
-                    text="\n".join(it.text for it in items),
+                    text="\n".join(it.text for it in items if it.is_content_body),
                     items=items,
                 )
             )
@@ -195,45 +279,113 @@ class PDFParser:
         max_chunk_size: int = 500,
         overlap: int = 50,
     ) -> List[ChunkData]:
+        """Semantic chunking with section-aware splitting.
+
+        Key behaviours:
+        - Page boundaries are ignored; text flows continuously across pages.
+        - A new chunk is always started at each section heading.
+        - Splits prefer Japanese/English sentence endings (。 . ! ?), never colons.
+        - Tables and Formulas are kept intact (not split mid-element).
+        - The last `overlap` characters of a completed chunk are carried into the
+          next chunk as context, starting from a clean sentence boundary.
+        """
         chunks: List[ChunkData] = []
         chunk_index = 0
         current_section: Optional[str] = None
-        current_text = ""
-        current_page = 1
+        buffer: List[str] = []
+        current_page: int = 1
+        overlap_prefix: str = ""
+
+        def buffer_len() -> int:
+            return sum(len(p) for p in buffer)
 
         def flush(page_no: int) -> None:
-            nonlocal chunk_index, current_text
-            if current_text.strip():
+            nonlocal chunk_index, buffer, overlap_prefix
+            content = "\n\n".join(p for p in buffer if p.strip()).strip()
+            if content:
                 chunks.append(
                     ChunkData(
                         chunk_index=chunk_index,
                         section_title=current_section,
-                        content=current_text.strip(),
+                        content=content,
                         page_number=page_no,
                         location_json={"page": page_no, "section": current_section},
                     )
                 )
                 chunk_index += 1
-                current_text = ""
-
-        for page in pages:
-            current_page = page.page_number
-            for item in page.items:
-                if not item.is_content_body:
-                    continue
-                if item.is_heading:
-                    flush(current_page)
-                    current_section = item.text
-                    continue
-
-                if len(current_text) + len(item.text) > max_chunk_size:
-                    flush(current_page)
-                    if overlap > 0 and len(current_text) > overlap:
-                        current_text = current_text[-overlap:] + " " + item.text
-                    else:
-                        current_text = item.text
+                if overlap > 0:
+                    tail = content[-overlap:]
+                    # Start overlap at a clean sentence boundary when possible
+                    m = re.search(r'(?<=[。.!?！？])\s*\S', tail)
+                    overlap_prefix = tail[m.start():] if m else tail
                 else:
-                    current_text += ("\n\n" if current_text else "") + item.text
+                    overlap_prefix = ""
+            buffer = []
+
+        # Flatten all content items in reading order, ignoring page boundaries
+        all_items: List[Tuple[TextItem, int]] = [
+            (item, page.page_number)
+            for page in pages
+            for item in page.items
+        ]
+
+        for item, page_no in all_items:
+            if not item.is_content_body:
+                continue
+
+            current_page = page_no
+
+            # ── Section heading: always start a new chunk ─────────────
+            if item.is_heading:
+                flush(page_no)
+                level = 1 if item.element_type == "Title" else 2
+                current_section = item.text
+                buffer = [f"{'#' * level} {item.text}"]
+                overlap_prefix = ""  # do not carry context across section boundary
+                continue
+
+            # ── Atomic elements: keep intact, flush first if needed ───
+            if item.element_type in _ATOMIC_TYPES:
+                if buffer_len() + len(item.text) > max_chunk_size and buffer_len() > 0:
+                    flush(page_no)
+                    if overlap_prefix:
+                        buffer = [overlap_prefix]
+                        overlap_prefix = ""
+                buffer.append(item.text)
+                continue
+
+            # ── Regular text: split at sentence boundaries if needed ──
+            text = item.text
+            while text:
+                available = max_chunk_size - buffer_len()
+                if len(text) <= available:
+                    buffer.append(text)
+                    text = ""
+                    break
+
+                # Find the last sentence-ending position within available space.
+                # Colons are intentionally excluded from split candidates.
+                split_pos = -1
+                for m in re.finditer(r'[。.!?！？]', text[:available]):
+                    split_pos = m.end()
+
+                if split_pos > 0:
+                    buffer.append(text[:split_pos].strip())
+                    text = text[split_pos:].lstrip()
+                    flush(page_no)
+                    if overlap_prefix:
+                        buffer = [overlap_prefix]
+                        overlap_prefix = ""
+                elif buffer_len() > 0:
+                    # No sentence boundary fits; flush what we have and retry
+                    flush(page_no)
+                    if overlap_prefix:
+                        buffer = [overlap_prefix]
+                        overlap_prefix = ""
+                else:
+                    # A single sentence exceeds max_chunk_size; accept as-is
+                    buffer.append(text)
+                    text = ""
 
         flush(current_page)
         return chunks
