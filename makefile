@@ -219,7 +219,7 @@ visualize-docling:
 		exec backend pip install requests pdf2image Pillow > /dev/null 2>&1
 	@echo "[3/4] Generating visualization image..."
 	@docker compose -f docker-compose.yml -f docker-compose.debug.yml \
-		exec backend python /app/tests/visualize_parser.py --pdf /app/tests/test_pdf/多田有里_deim2026_予稿.pdf
+		exec backend python /app/tests/visualize_parser.py --pdf /app/tests/test_pdf/多田有里_deim2026_予稿.pdf --url http://parser:8001
 	@echo "[4/4] Copying image to host..."
 	@docker compose -f docker-compose.yml -f docker-compose.debug.yml \
 		cp backend:/app/visualized_pages ./visualized_pages
