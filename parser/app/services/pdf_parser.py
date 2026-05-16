@@ -30,6 +30,7 @@ _LABEL_TYPE_MAP: Dict[str, str] = {
 }
 
 _HEADING_TYPES = {"SectionHeader", "Title"}
+_NOISE_TYPES = {"PageHeader", "PageFooter"}
 
 
 def _label_str(label) -> str:
@@ -140,6 +141,12 @@ class PDFParser:
 
             is_heading = element_type in _HEADING_TYPES
 
+            stripped = text.strip()
+            is_content_body = element_type not in _NOISE_TYPES
+            # Page-number-only text: short and purely numeric (e.g. "1", "12")
+            if is_content_body and len(stripped) <= 5 and stripped.isdigit():
+                is_content_body = False
+
             for prov in (item.prov or []):
                 page_no = int(prov.page_no)
                 bbox_obj = prov.bbox
@@ -152,11 +159,12 @@ class PDFParser:
                 ]
 
                 text_item = TextItem(
-                    text=text.strip(),
+                    text=stripped,
                     bbox=bbox,
                     font_size=None,
                     is_heading=is_heading,
                     element_type=element_type,
+                    is_content_body=is_content_body,
                 )
                 all_items.append(text_item)
                 page_items.setdefault(page_no, []).append(text_item)
@@ -211,6 +219,8 @@ class PDFParser:
         for page in pages:
             current_page = page.page_number
             for item in page.items:
+                if not item.is_content_body:
+                    continue
                 if item.is_heading:
                     flush(current_page)
                     current_section = item.text

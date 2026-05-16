@@ -244,6 +244,40 @@ def test_parse_pdf(pdf_name: str, r: Result, index: int):
                 isinstance(c0.get("page_number"), int),
                 str(c0.get("page_number")))
 
+        # Quality: no chunk should be empty or consist solely of a short number
+        noise_chunks = [
+            c for c in chunks
+            if not c.get("content", "").strip()
+            or (len(c.get("content", "").strip()) <= 5
+                and c.get("content", "").strip().isdigit())
+        ]
+        r.check("no noise-only chunks", len(noise_chunks) == 0,
+                f"{len(noise_chunks)} noisy chunks found")
+
+        # Quality: warn if any chunk is suspiciously short (< 20 chars)
+        short_chunks = [c for c in chunks if len(c.get("content", "").strip()) < 20]
+        r.check("no suspiciously short chunks (<20 chars)",
+                len(short_chunks) == 0,
+                f"{len(short_chunks)} short chunks: "
+                + str([c.get("content", "")[:30] for c in short_chunks[:3]]))
+
+        # Write reconstructed text to file for manual inspection.
+        # Prefer TEST_OUTPUT_DIR env var, then /tmp (always writable in container).
+        output_dir = os.getenv("TEST_OUTPUT_DIR", "/tmp")
+        stem = os.path.splitext(pdf_name)[0]
+        out_path = os.path.join(output_dir, f"{stem}_reconstructed.txt")
+        reconstructed = "\n\n".join(
+            f"[chunk {c.get('chunk_index', i)} / page {c.get('page_number', '?')}]\n"
+            + c.get("content", "")
+            for i, c in enumerate(chunks)
+        )
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(reconstructed)
+            print(f"       Reconstructed text → {out_path}")
+        except OSError as e:
+            print(f"       [WARN] Could not write reconstructed text: {e}")
+
     print(f"       Summary: {meta.get('num_pages')} pages, "
           f"{len(all_items if pages else [])} items, "
           f"{len(chunks)} chunks")

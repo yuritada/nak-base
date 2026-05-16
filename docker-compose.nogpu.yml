@@ -1,0 +1,8 @@
+# CPU-only override: removes the NVIDIA GPU requirement from the parser service.
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.debug.yml -f docker-compose.nogpu.yml up -d
+services:
+  parser:
+    deploy:
+      resources:
+        reservations:
+          devices: []

@@ -31,6 +31,7 @@ class TextItem(BaseModel):
     font_size: Optional[float] = None
     is_heading: bool = False
     element_type: Optional[str] = None  # "Paragraph", "SectionHeader", "Title", "Table", etc.
+    is_content_body: bool = True  # False for PageHeader, PageFooter, page-number noise
 
 
 class PageData(BaseModel):
