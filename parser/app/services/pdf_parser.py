@@ -6,12 +6,28 @@ Uses Docling (IBM) for:
 - Semantic element recognition (Paragraph, SectionHeader, Table, etc.)
 - Bounding box extraction with correct 2-column reading order
 - Markdown export
+
+Memory/performance notes:
+- OCR is disabled by default (PARSER_USE_OCR=true to enable).
+  Digital PDFs already contain embedded text; OCR adds ~1-2 GB of model
+  weights AND renders every page as a full-resolution image – the dominant
+  cause of memory pressure for academic PDF workloads.
+- GPU acceleration is configured explicitly via AcceleratorOptions so that
+  layout-analysis and table-structure models run on CUDA when available.
+- gc.collect() + torch.cuda.empty_cache() are called after every parse to
+  release intermediate tensors and prevent accumulation across requests.
 """
+import gc
 import os
 import re
 from typing import Dict, List, Optional, Tuple
 
 from ..schemas import ChunkData, DocumentMeta, PageData, ParseResponse, TextItem
+
+# ── Runtime knobs (set via environment variables) ─────────────────────────────
+# Set PARSER_USE_OCR=true only for scanned (image-only) PDFs.
+# Enabling OCR for digital PDFs causes 3-5× memory overhead and 10× slowdown.
+_USE_OCR: bool = os.getenv("PARSER_USE_OCR", "false").lower() == "true"
 
 # Docling label → our element_type string
 _LABEL_TYPE_MAP: Dict[str, str] = {
@@ -93,52 +109,125 @@ class PDFParser:
 
     def __init__(self, debug: bool = False):
         self.debug = debug
-        self._converter = None  # lazy-loaded to avoid slow import at startup
+        self._converter = None  # lazy-loaded on first request
 
     @property
     def converter(self):
+        """Return the singleton DocumentConverter, creating it on first access.
+
+        Pipeline options are chosen for digital (born-digital) PDFs:
+        - do_ocr=False : avoids EasyOCR model loading and full-page rasterisation,
+                         the single largest source of RAM pressure.
+        - do_table_structure=True : table cell recognition via TableFormer (GPU).
+        - AcceleratorOptions : explicitly routes layout and table models to CUDA
+                               so PyTorch infers on the GPU when available.
+        """
         if self._converter is None:
             from docling.document_converter import DocumentConverter, PdfFormatOption
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
+            from docling.pipeline.standard_pdf_pipeline import PdfPipelineOptions
             from docling.datamodel.base_models import InputFormat
 
             pipeline_options = PdfPipelineOptions()
             pipeline_options.do_table_structure = True
-            pipeline_options.do_ocr = True
-            # Formula enrichment is available in newer docling versions; skip gracefully if absent
+            pipeline_options.do_ocr = _USE_OCR
+
+            # ── GPU acceleration ──────────────────────────────────────────
+            # AcceleratorOptions was introduced in docling ≥ 2.5.
+            # Fall back silently for older versions; docling defaults to AUTO.
             try:
-                pipeline_options.do_formula_enrichment = True
-            except AttributeError:
-                pass
+                from docling.datamodel.pipeline_options import (
+                    AcceleratorOptions,
+                    AcceleratorDevice,
+                )
+                import torch
+
+                device = (
+                    AcceleratorDevice.CUDA
+                    if torch.cuda.is_available()
+                    else AcceleratorDevice.CPU
+                )
+                pipeline_options.accelerator_options = AcceleratorOptions(
+                    num_threads=4,
+                    device=device,
+                )
+                if self.debug:
+                    print(f"[PDFParser] Accelerator device: {device.value}")
+            except (ImportError, AttributeError):
+                if self.debug:
+                    print("[PDFParser] AcceleratorOptions unavailable; using docling default")
+
+            # Formula enrichment is available in docling ≥ 2.7 (OCR mode only)
+            if _USE_OCR:
+                try:
+                    pipeline_options.do_formula_enrichment = True
+                except AttributeError:
+                    pass
 
             self._converter = DocumentConverter(
                 format_options={
                     InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
                 }
             )
+
+            if self.debug:
+                print(f"[PDFParser] Converter ready (OCR={'on' if _USE_OCR else 'off'})")
+
         return self._converter
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def parse(self, file_path: str) -> ParseResponse:
         if self.debug:
-            print(f"[PDFParser] Parsing with Docling: {file_path}")
+            print(f"[PDFParser] Parsing: {file_path}")
 
-        result = self.converter.convert(file_path)
-        doc = result.document
+        try:
+            result = self.converter.convert(file_path)
+            doc = result.document
 
-        meta = self._extract_metadata(doc, file_path)
-        pages, all_items = self._extract_pages(doc)
-        content = _clean_japanese_text(doc.export_to_markdown())
-        chunks = self._generate_chunks(pages)
+            meta = self._extract_metadata(doc, file_path)
+            pages, all_items = self._extract_pages(doc)
+            content = _clean_japanese_text(doc.export_to_markdown())
+            chunks = self._generate_chunks(pages)
 
-        if self.debug:
-            print(f"[PDFParser] {len(pages)} pages, {len(all_items)} items, {len(chunks)} chunks")
+            if self.debug:
+                print(
+                    f"[PDFParser] Done – {len(pages)} pages, "
+                    f"{len(all_items)} items, {len(chunks)} chunks"
+                )
 
-        return ParseResponse(
-            content=content,
-            meta=meta,
-            pages=pages,
-            chunks=chunks,
-        )
+            return ParseResponse(
+                content=content,
+                meta=meta,
+                pages=pages,
+                chunks=chunks,
+            )
+        finally:
+            # Always release intermediate GPU tensors and Python objects so
+            # that sequential multi-document parsing does not accumulate RAM.
+            self._cleanup_memory()
+
+    # ------------------------------------------------------------------
+    # Memory management
+    # ------------------------------------------------------------------
+
+    def _cleanup_memory(self) -> None:
+        """Free intermediate GPU tensors and trigger Python GC."""
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if self.debug:
+                    alloc = torch.cuda.memory_allocated() / 1024 ** 2
+                    resv = torch.cuda.memory_reserved() / 1024 ** 2
+                    print(
+                        f"[PDFParser] VRAM after GC – "
+                        f"allocated={alloc:.0f} MB  reserved={resv:.0f} MB"
+                    )
+        except ImportError:
+            pass
 
     # ------------------------------------------------------------------
     # Internal helpers
