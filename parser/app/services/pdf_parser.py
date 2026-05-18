@@ -124,7 +124,7 @@ class PDFParser:
         """
         if self._converter is None:
             from docling.document_converter import DocumentConverter, PdfFormatOption
-            from docling.pipeline.standard_pdf_pipeline import PdfPipelineOptions
+            from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOptions, AcceleratorDevice
             from docling.datamodel.base_models import InputFormat
 
             pipeline_options = PdfPipelineOptions()
@@ -138,16 +138,17 @@ class PDFParser:
                 from docling.datamodel.pipeline_options import (
                     AcceleratorOptions,
                     AcceleratorDevice,
+                    PdfPipelineOptions,
                 )
                 import torch
 
                 device = (
                     AcceleratorDevice.CUDA
                     if torch.cuda.is_available()
-                    else AcceleratorDevice.CPU
+                    else print("error: CUDA not available, running Docling on CPU (slow)")
                 )
                 pipeline_options.accelerator_options = AcceleratorOptions(
-                    num_threads=4,
+                    num_threads=1,
                     device=device,
                 )
                 if self.debug:

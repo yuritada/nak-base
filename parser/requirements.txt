@@ -10,6 +10,7 @@ python-multipart>=0.0.6
 
 # Phase 1.3: Docling semantic layout analysis
 docling
+onnxruntime-gpu
 
 # Phase 1.5: DOCX support
 python-docx

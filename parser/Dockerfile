@@ -49,7 +49,7 @@ import torch
 print(f"CUDA available: {torch.cuda.is_available()}")
 
 from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.pipeline.standard_pdf_pipeline import PdfPipelineOptions
+from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOptions, AcceleratorDevice
 from docling.datamodel.base_models import InputFormat
 
 pipeline_options = PdfPipelineOptions()
