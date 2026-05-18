@@ -1,28 +1,15 @@
 # Debug mode overlay for nak-base
 # Usage: docker-compose -f docker-compose.yml -f docker-compose.debug.yml up -d
 #
-# This file mounts test scripts only in debug mode.
-# Production builds (docker-compose.yml only) will NOT include test code.
+# Mounts test scripts and enables memory/debug logging in the integrated backend.
 
 services:
   backend:
-    volumes:
-      - ./tests:/app/tests:ro
-      - ./logs:/app/logs
-
-  worker:
-    volumes:
-      - ./tests:/app/tests:ro
-      - ./logs:/app/logs
-
-  parser:
     environment:
-      # Enable per-stage RSS memory snapshots (printed to stderr → docker logs).
-      # Remove or set to "false" after diagnosing the RAM issue.
       PARSER_DEBUG_MEMORY: "true"
       PARSER_DEBUG: "true"
     volumes:
-      # Test scripts accessible inside the parser container
       - ./tests:/app/tests:ro
-      # Test PDFs mounted at /test_pdf so the parser can read them by path
+      - ./tests:/worker/tests:ro
       - ./tests/test_pdf:/test_pdf:ro
+      - ./logs:/app/logs

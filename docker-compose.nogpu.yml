@@ -1,7 +1,10 @@
-# CPU-only override: removes the NVIDIA GPU requirement from the parser service.
-# Usage: docker-compose -f docker-compose.yml -f docker-compose.debug.yml -f docker-compose.nogpu.yml up -d
+# CPU-only override: removes the NVIDIA GPU requirement and uses CPU torch/onnxruntime.
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.nogpu.yml up -d
 services:
-  parser:
+  backend:
+    build:
+      args:
+        INSTALL_GPU: "false"
     deploy:
       resources:
         reservations:

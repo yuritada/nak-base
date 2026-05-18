@@ -21,23 +21,6 @@ services:
       - nak_network
     restart: always
 
-  # Redis Message Queue (シンプルなFIFOキュー)
-  redis:
-    image: redis:7-alpine
-    container_name: nak_base_redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - nak_network
-    restart: always
-
   # Ollama LLM Container
   ollama:
     image: ollama/ollama:latest
@@ -51,26 +34,28 @@ services:
     restart: always
     # 初回起動後に手動で ollama pull gemma2:2b を実行
 
-  # Parser Service (PDF→テキスト抽出)
-  parser:
+  # Integrated Backend (FastAPI API + Parser + Worker + Redis)
+  backend:
     build:
-      context: ./parser
-      dockerfile: Dockerfile
-    container_name: nak_base_parser
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        INSTALL_GPU: "true"
+    container_name: nak_base_backend
     environment:
+      # Backend
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nakbase}:${POSTGRES_PASSWORD:-nakbase_secret}@db:5432/${POSTGRES_DB:-nakbase}
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+      STORAGE_PATH: /storage
       DEBUG_MODE: "true"
-      # OCR: デジタルPDFには不要。スキャンPDFのみ true に変更する。
-      # true にすると EasyOCR モデル (~500 MB) + ページ全画像展開で RAM が急増する。
+      # Worker
+      OLLAMA_URL: http://ollama:11434
+      PARSER_URL: http://localhost:8001
+      MOCK_MODE: "true"
+      # Parser
       PARSER_USE_OCR: "false"
-      # GPU メモリフラグメント抑制 (PyTorch >= 2.0)
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
-      # OpenMP スレッド数: CPU 前処理が GPU 推論のコアを奪わないよう制限
-      OMP_NUM_THREADS: "4"
-      MKL_NUM_THREADS: "4"
-      # glibc メモリアリーナ削減（仮想メモリ断片化防止）
-      MALLOC_ARENA_MAX: "2"
-      # HuggingFace tokenizer 並列化警告を抑制
-      TOKENIZERS_PARALLELISM: "false"
     deploy:
       resources:
         reservations:
@@ -79,73 +64,20 @@ services:
               count: 1
               capabilities: [gpu]
     volumes:
-      - ./parser:/app
-      - paper_storage:/storage:ro
-    ports:
-      - "8001:8001"
-    networks:
-      - nak_network
-    restart: always
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
-
-  # FastAPI Backend (Operating API)
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: nak_base_backend
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-nakbase}:${POSTGRES_PASSWORD:-nakbase_secret}@db:5432/${POSTGRES_DB:-nakbase}
-      REDIS_URL: redis://redis:6379/0
-      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
-      STORAGE_PATH: /storage
-      DEBUG_MODE: "true"
-    volumes:
       - ./backend:/app
+      - ./worker:/worker
+      - ./parser:/parser
       - paper_storage:/storage
     ports:
       - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - nak_network
-    restart: always
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-  # AI Inference Worker (シングルプロセス、順次実行)
-  worker:
-    build:
-      context: ./worker
-      dockerfile: Dockerfile
-    container_name: nak_base_worker
-    environment:
-      PYTHONUNBUFFERED: "1"
-      DATABASE_URL: postgresql://${POSTGRES_USER:-nakbase}:${POSTGRES_PASSWORD:-nakbase_secret}@db:5432/${POSTGRES_DB:-nakbase}
-      REDIS_URL: redis://redis:6379/0
-      OLLAMA_URL: http://ollama:11434
-      PARSER_URL: http://parser:8001
-      STORAGE_PATH: /storage
-      MOCK_MODE: "true" # 開発用にモックモードをデフォルトで有効化
-      DEBUG_MODE: "true"
-    volumes:
-      - ./worker:/app
-      - paper_storage:/storage:ro
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       ollama:
         condition: service_started
-      parser:
-        condition: service_started
     networks:
       - nak_network
     restart: always
-    command: python -m app.worker
 
   # Next.js Frontend
   frontend:
@@ -169,7 +101,6 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
   ollama_data:
   paper_storage:
   frontend_node_modules:
