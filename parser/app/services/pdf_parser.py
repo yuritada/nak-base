@@ -16,10 +16,17 @@ Memory/performance notes:
   layout-analysis and table-structure models run on CUDA when available.
 - gc.collect() + torch.cuda.empty_cache() are called after every parse to
   release intermediate tensors and prevent accumulation across requests.
+
+Debug/memory logging:
+- Set PARSER_DEBUG_MEMORY=true to enable per-stage RSS memory snapshots.
+  These are printed to stderr and do NOT require debug=True.
+- Set PARSER_DEBUG=true (or pass debug=True) for detailed pipeline traces.
 """
 import gc
 import os
 import re
+import sys
+import time
 from typing import Dict, List, Optional, Tuple
 
 from ..schemas import ChunkData, DocumentMeta, PageData, ParseResponse, TextItem
@@ -28,6 +35,51 @@ from ..schemas import ChunkData, DocumentMeta, PageData, ParseResponse, TextItem
 # Set PARSER_USE_OCR=true only for scanned (image-only) PDFs.
 # Enabling OCR for digital PDFs causes 3-5× memory overhead and 10× slowdown.
 _USE_OCR: bool = os.getenv("PARSER_USE_OCR", "false").lower() == "true"
+
+# Set PARSER_DEBUG_MEMORY=true to print RSS memory snapshots at each stage.
+_DEBUG_MEMORY: bool = os.getenv("PARSER_DEBUG_MEMORY", "false").lower() == "true"
+# Set PARSER_DEBUG=true as an alternative to passing debug=True at construction.
+_DEBUG_ENV: bool = os.getenv("PARSER_DEBUG", "false").lower() == "true"
+
+
+# ── Memory snapshot helper ─────────────────────────────────────────────────────
+
+def _rss_mb() -> float:
+    """Return current process RSS in MB. Uses psutil when available, otherwise
+    falls back to /proc/self/status (Linux) or resource module."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / 1024 ** 2
+    except ImportError:
+        pass
+    try:
+        import resource
+        # ru_maxrss is KB on Linux, bytes on macOS
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        import platform
+        return raw / 1024 if platform.system() == "Darwin" else raw / 1024
+    except Exception:
+        return -1.0
+
+
+_mem_baseline: float = 0.0  # set at module import time
+_mem_baseline = _rss_mb()
+
+
+def _mlog(label: str, extra: str = "") -> None:
+    """Print a memory snapshot line to stderr (only when _DEBUG_MEMORY is set)."""
+    if not _DEBUG_MEMORY:
+        return
+    rss = _rss_mb()
+    delta = rss - _mem_baseline
+    parts = [
+        f"[MEM] {label:<50}",
+        f"RSS={rss:7.0f} MB",
+        f"delta={delta:+7.0f} MB",
+    ]
+    if extra:
+        parts.append(extra)
+    print("  ".join(parts), file=sys.stderr, flush=True)
 
 # Docling label → our element_type string
 _LABEL_TYPE_MAP: Dict[str, str] = {
@@ -108,8 +160,9 @@ class PDFParser:
     """Docling-based PDF parser with semantic structure and coordinate extraction."""
 
     def __init__(self, debug: bool = False):
-        self.debug = debug
+        self.debug = debug or _DEBUG_ENV
         self._converter = None  # lazy-loaded on first request
+        _mlog("PDFParser.__init__")
 
     @property
     def converter(self):
@@ -123,39 +176,52 @@ class PDFParser:
                                so PyTorch infers on the GPU when available.
         """
         if self._converter is None:
+            _mlog("converter init: before imports")
             from docling.document_converter import DocumentConverter, PdfFormatOption
             from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOptions, AcceleratorDevice
             from docling.datamodel.base_models import InputFormat
+            _mlog("converter init: after docling imports")
 
             pipeline_options = PdfPipelineOptions()
             pipeline_options.do_table_structure = True
             pipeline_options.do_ocr = _USE_OCR
 
+            if self.debug or _DEBUG_MEMORY:
+                print(
+                    f"[PDFParser] Pipeline opts: do_ocr={pipeline_options.do_ocr}  "
+                    f"do_table_structure={pipeline_options.do_table_structure}",
+                    file=sys.stderr,
+                )
+
             # ── GPU acceleration ──────────────────────────────────────────
             # AcceleratorOptions was introduced in docling ≥ 2.5.
             # Fall back silently for older versions; docling defaults to AUTO.
             try:
-                from docling.datamodel.pipeline_options import (
-                    AcceleratorOptions,
-                    AcceleratorDevice,
-                    PdfPipelineOptions,
-                )
                 import torch
+                _mlog("converter init: torch imported")
 
-                device = (
-                    AcceleratorDevice.CUDA
-                    if torch.cuda.is_available()
-                    else print("error: CUDA not available, running Docling on CPU (slow)")
-                )
+                cuda_avail = torch.cuda.is_available()
+                if self.debug or _DEBUG_MEMORY:
+                    print(f"[PDFParser] CUDA available: {cuda_avail}", file=sys.stderr)
+
+                if cuda_avail:
+                    device = AcceleratorDevice.CUDA
+                else:
+                    print(
+                        "[PDFParser] WARNING: CUDA not available – running Docling on CPU (slow)",
+                        file=sys.stderr,
+                    )
+                    device = AcceleratorDevice.CPU
+
                 pipeline_options.accelerator_options = AcceleratorOptions(
                     num_threads=1,
                     device=device,
                 )
                 if self.debug:
-                    print(f"[PDFParser] Accelerator device: {device.value}")
+                    print(f"[PDFParser] Accelerator device: {device.value}", file=sys.stderr)
             except (ImportError, AttributeError):
                 if self.debug:
-                    print("[PDFParser] AcceleratorOptions unavailable; using docling default")
+                    print("[PDFParser] AcceleratorOptions unavailable; using docling default", file=sys.stderr)
 
             # Formula enrichment is available in docling ≥ 2.7 (OCR mode only)
             if _USE_OCR:
@@ -164,15 +230,18 @@ class PDFParser:
                 except AttributeError:
                     pass
 
+            _mlog("converter init: before DocumentConverter()")
+            _t0 = time.perf_counter()
             self._converter = DocumentConverter(
                 format_options={
                     InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
                 }
             )
+            _elapsed = time.perf_counter() - _t0
+            _mlog(f"converter init: after DocumentConverter()", extra=f"elapsed={_elapsed:.1f}s")
 
             if self.debug:
-                print(f"[PDFParser] Converter ready (OCR={'on' if _USE_OCR else 'off'})")
-
+                print(f"[PDFParser] Converter ready (OCR={'on' if _USE_OCR else 'off'})", file=sys.stderr)
         return self._converter
 
     # ------------------------------------------------------------------
@@ -180,22 +249,63 @@ class PDFParser:
     # ------------------------------------------------------------------
 
     def parse(self, file_path: str) -> ParseResponse:
+        fname = os.path.basename(file_path)
         if self.debug:
-            print(f"[PDFParser] Parsing: {file_path}")
+            print(f"[PDFParser] Parsing: {file_path}", file=sys.stderr)
+        _mlog(f"parse() start  {fname}")
 
         try:
+            # ── Stage 1: convert PDF ──────────────────────────────────
+            _mlog(f"parse() before convert()  {fname}")
+            _t0 = time.perf_counter()
             result = self.converter.convert(file_path)
             doc = result.document
+            _elapsed = time.perf_counter() - _t0
+            _mlog(f"parse() after  convert()  {fname}", extra=f"elapsed={_elapsed:.1f}s")
 
+            # ── Stage 2: metadata ──────────────────────────────────────
+            _mlog(f"parse() before _extract_metadata  {fname}")
             meta = self._extract_metadata(doc, file_path)
+
+            # ── Stage 3: extract pages/items ──────────────────────────
+            _mlog(f"parse() before _extract_pages  {fname}")
+            _t1 = time.perf_counter()
             pages, all_items = self._extract_pages(doc)
+            _elapsed = time.perf_counter() - _t1
+            _mlog(
+                f"parse() after  _extract_pages  {fname}",
+                extra=f"pages={len(pages)} items={len(all_items)} elapsed={_elapsed:.1f}s",
+            )
+
+            # ── Stage 4: markdown export ───────────────────────────────
+            _mlog(f"parse() before export_to_markdown  {fname}")
             content = _clean_japanese_text(doc.export_to_markdown())
+            _mlog(
+                f"parse() after  export_to_markdown  {fname}",
+                extra=f"md_len={len(content)}",
+            )
+
+            # ── Stage 5: free the heavy doc object ─────────────────────
+            # Release the Docling document (and the result) *before* chunking
+            # so that ML model tensors and page images are freed early.
+            _mlog(f"parse() before del result/doc  {fname}")
+            del result, doc
+            gc.collect()
+            _mlog(f"parse() after  del result/doc  {fname}")
+
+            # ── Stage 6: chunking ──────────────────────────────────────
+            _mlog(f"parse() before _generate_chunks  {fname}")
             chunks = self._generate_chunks(pages)
+            _mlog(
+                f"parse() after  _generate_chunks  {fname}",
+                extra=f"chunks={len(chunks)}",
+            )
 
             if self.debug:
                 print(
                     f"[PDFParser] Done – {len(pages)} pages, "
-                    f"{len(all_items)} items, {len(chunks)} chunks"
+                    f"{len(all_items)} items, {len(chunks)} chunks",
+                    file=sys.stderr,
                 )
 
             return ParseResponse(
@@ -207,7 +317,9 @@ class PDFParser:
         finally:
             # Always release intermediate GPU tensors and Python objects so
             # that sequential multi-document parsing does not accumulate RAM.
+            _mlog(f"parse() before _cleanup_memory  {fname}")
             self._cleanup_memory()
+            _mlog(f"parse() after  _cleanup_memory  {fname}")
 
     # ------------------------------------------------------------------
     # Memory management
@@ -215,20 +327,30 @@ class PDFParser:
 
     def _cleanup_memory(self) -> None:
         """Free intermediate GPU tensors and trigger Python GC."""
+        _before = _rss_mb()
         gc.collect()
         try:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                if self.debug:
-                    alloc = torch.cuda.memory_allocated() / 1024 ** 2
-                    resv = torch.cuda.memory_reserved() / 1024 ** 2
+                alloc = torch.cuda.memory_allocated() / 1024 ** 2
+                resv = torch.cuda.memory_reserved() / 1024 ** 2
+                if self.debug or _DEBUG_MEMORY:
                     print(
                         f"[PDFParser] VRAM after GC – "
-                        f"allocated={alloc:.0f} MB  reserved={resv:.0f} MB"
+                        f"allocated={alloc:.0f} MB  reserved={resv:.0f} MB",
+                        file=sys.stderr,
                     )
         except ImportError:
             pass
+        _after = _rss_mb()
+        if _DEBUG_MEMORY:
+            print(
+                f"[MEM] _cleanup_memory  RSS before={_before:.0f} MB  "
+                f"after={_after:.0f} MB  freed={_before - _after:+.0f} MB",
+                file=sys.stderr,
+                flush=True,
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -278,11 +400,14 @@ class PDFParser:
                 page_dims[int(page_no)] = (w, h)
 
         # ── Pass 1: collect raw items ─────────────────────────────────
+        _mlog("_extract_pages: before iterate_items() pass-1")
         raw_items: List[Tuple[int, TextItem]] = []
+        _item_count_by_type: Dict[str, int] = {}
 
         for item, _ in doc.iterate_items():
             label = _label_str(item.label)
             element_type = _LABEL_TYPE_MAP.get(label, "Paragraph")
+            _item_count_by_type[element_type] = _item_count_by_type.get(element_type, 0) + 1
 
             text: Optional[str] = getattr(item, "text", None)
             if not text and label == "table" and hasattr(item, "export_to_markdown"):
@@ -318,6 +443,11 @@ class PDFParser:
                 )
                 raw_items.append((page_no, text_item))
 
+        _mlog(
+            "_extract_pages: after  iterate_items() pass-1",
+            extra=f"raw_items={len(raw_items)} type_counts={_item_count_by_type}",
+        )
+
         # ── Build Figure bbox index per page ──────────────────────────
         figure_bboxes: Dict[int, List[List[float]]] = {}
         for page_no, item in raw_items:
@@ -325,6 +455,7 @@ class PDFParser:
                 figure_bboxes.setdefault(page_no, []).append(item.bbox)
 
         # ── Pass 2: filter items that lie inside Figure regions ───────
+        _mlog("_extract_pages: before pass-2 figure-filter")
         page_items: Dict[int, List[TextItem]] = {}
         all_items: List[TextItem] = []
 
@@ -342,6 +473,11 @@ class PDFParser:
 
             all_items.append(item)
             page_items.setdefault(page_no, []).append(item)
+
+        _mlog(
+            "_extract_pages: after  pass-2 figure-filter",
+            extra=f"all_items={len(all_items)} pages_with_items={len(page_items)}",
+        )
 
         # ── Build sorted PageData list ────────────────────────────────
         all_page_nos = sorted(

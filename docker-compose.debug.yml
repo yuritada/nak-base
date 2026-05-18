@@ -16,6 +16,11 @@ services:
       - ./logs:/app/logs
 
   parser:
+    environment:
+      # Enable per-stage RSS memory snapshots (printed to stderr → docker logs).
+      # Remove or set to "false" after diagnosing the RAM issue.
+      PARSER_DEBUG_MEMORY: "true"
+      PARSER_DEBUG: "true"
     volumes:
       # Test scripts accessible inside the parser container
       - ./tests:/app/tests:ro
